@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bvttimetrack
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: BASE_URL
+        value: https://bvttimetrack.onrender.com
+      - key: NODE_ENV
+        value: production
+      - key: GOOGLE_CLIENT_ID
+        sync: false        # set manually in Render dashboard
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false        # set manually in Render dashboard
+      - key: SESSION_SECRET
+        generateValue: true  # Render auto-generates a secure random value

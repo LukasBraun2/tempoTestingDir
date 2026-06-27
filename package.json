@@ -1,0 +1,21 @@
+{
+  "name": "tempo-server",
+  "version": "1.0.0",
+  "description": "Tempo time tracker local server",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch server/index.js",
+    "build": "npm rebuild better-sqlite3"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.3",
+    "express-session": "^1.19.0",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "pg": "^8.21.0"
+  }
+}
