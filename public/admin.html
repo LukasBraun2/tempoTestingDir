@@ -794,21 +794,40 @@ window.runImport = async () => {
     }).filter(r => r.email && r.startDate && r.endDate);
 
 try {
-    console.log("First 6 payload rows:", JSON.stringify(payload.slice(0, 6), null, 2));
-    const res = await fetch(`${API}/api/admin/import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ entries: payload }),
-    });
-    const raw = await res.text(); // read as text first
-    console.log("Import response status:", res.status);
-    console.log("Import response body:", raw);   // <── look at this in F12 console
-    const data = JSON.parse(raw);
-    if (!res.ok) throw new Error(data.error || "Server error");
-    // ... rest unchanged
+    const BATCH_SIZE = 2000; // keeps each request well under any reasonable body-size limit
+    const batches = [];
+    for (let i = 0; i < payload.length; i += BATCH_SIZE) batches.push(payload.slice(i, i + BATCH_SIZE));
+
+    let totalInserted = 0, totalSkipped = 0;
+    const affectedEmails = new Set();
+
+    for (let b = 0; b < batches.length; b++) {
+      prog.className = "import-progress";
+      prog.textContent = batches.length > 1
+        ? `Uploading batch ${b + 1} of ${batches.length} (${batches[b].length.toLocaleString()} entries)…`
+        : `Uploading ${batches[b].length.toLocaleString()} entries…`;
+
+      const res = await fetch(`${API}/api/admin/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries: batches[b] }),
+      });
+      const raw = await res.text(); // read as text first — server may return HTML on a crash/limit error
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(`Server returned a non-JSON response (status ${res.status}). It may have hit a size or timeout limit — try a smaller file.`);
+      }
+      if (!res.ok) throw new Error(data.error || `Server error (status ${res.status})`);
+
+      totalInserted += data.inserted || 0;
+      totalSkipped  += data.skipped  || 0;
+      batches[b].forEach(r => affectedEmails.add(r.email));
+    }
 
     prog.className = "import-progress ok";
-    prog.textContent = `✓ Imported ${data.inserted.toLocaleString()} entries for ${data.users.toLocaleString()} students. ${data.skipped > 0 ? `(${data.skipped} duplicates skipped)` : ""}`;
+    prog.textContent = `✓ Imported ${totalInserted.toLocaleString()} entries for ${affectedEmails.size.toLocaleString()} students. ${totalSkipped > 0 ? `(${totalSkipped.toLocaleString()} duplicates skipped)` : ""}`;
     loadData();
   } catch(err) {
     prog.className = "import-progress err";
