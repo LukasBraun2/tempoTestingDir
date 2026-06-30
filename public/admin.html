@@ -101,7 +101,7 @@
     <select class="filter-select" id="week-filter" onchange="onPeriodChange()">
       <option value="week">This week</option>
       <option value="month">This month</option>
-      <option value="all">All time</option>
+      <option value="all" selected>All time</option>
     </select>
     <!-- Calendar date picker -->
     <div class="cal-wrap" id="cal-wrap">
@@ -425,15 +425,23 @@ async function loadStats() {
 }
 
 // ── Flat, most-recent-first feed of individual time log entries ───────────────
+const ENTRY_PAGE_SIZE = 200;
+let entryOffset  = 0;
+let entryHasMore = false;
+let entryLoadingMore = false;
+
 async function loadEntries() {
+  entryOffset = 0;
   const search = document.getElementById("search-input").value;
-  const params = buildParams({ search, limit: 200 });
+  const params = buildParams({ search, limit: ENTRY_PAGE_SIZE, offset: 0 });
   try {
     const res = await fetch(`${API}/api/admin/entries/feed?` + params);
     if (!res.ok) { signOutAdmin(); return; }
     const data = await res.json();
-    lastEntries = data.entries;
-    renderEntryFeed(data.entries, data.totalEntries);
+    lastEntries  = data.entries;
+    entryHasMore = !!data.hasMore;
+    entryOffset  = data.entries.length;
+    renderEntryFeed(data.entries, data.totalEntries, { append: false, hasMore: entryHasMore });
     document.getElementById("last-updated").textContent =
       "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch(e) {
@@ -441,6 +449,29 @@ async function loadEntries() {
     document.getElementById("student-list").innerHTML = '<div class="loading">Failed to load. Is the server running?</div>';
   }
 }
+
+// Fetch the next page of entries and append them to the list already on screen.
+window.loadMoreEntries = async () => {
+  if (entryLoadingMore || !entryHasMore) return;
+  entryLoadingMore = true;
+  const btn = document.getElementById("load-more-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Loading…"; }
+  const search = document.getElementById("search-input").value;
+  const params = buildParams({ search, limit: ENTRY_PAGE_SIZE, offset: entryOffset });
+  try {
+    const res = await fetch(`${API}/api/admin/entries/feed?` + params);
+    if (!res.ok) { signOutAdmin(); return; }
+    const data = await res.json();
+    lastEntries  = lastEntries.concat(data.entries);
+    entryHasMore = !!data.hasMore;
+    entryOffset += data.entries.length;
+    renderEntryFeed(lastEntries, data.totalEntries, { append: false, hasMore: entryHasMore });
+  } catch(e) {
+    console.error("Failed to load more entries:", e);
+  } finally {
+    entryLoadingMore = false;
+  }
+};
 
 function loadData() { loadStats(); loadEntries(); }
 
@@ -471,7 +502,7 @@ window.deleteAllEntries = async () => {
 };
 
 // ── Render — a flat list of individual entries, newest first ──────────────────
-function renderEntryFeed(entries, totalEntries) {
+function renderEntryFeed(entries, totalEntries, opts = {}) {
   if (!entries || entries.length === 0) {
     document.getElementById("student-list").innerHTML = '<div class="loading">No entries found.</div>';
     return;
@@ -493,13 +524,19 @@ function renderEntryFeed(entries, totalEntries) {
       <div class="entry-dur mono">${e.durationFormatted}</div>
     </div>`).join("");
 
-  const shownNote = totalEntries > entries.length
-    ? `<div class="no-entries" style="font-size:12px;">Showing most recent ${entries.length} of ${totalEntries} entries.</div>`
+  const hasMore = !!opts.hasMore;
+  const countNote = hasMore
+    ? `<div class="no-entries" style="font-size:12px;">Showing ${entries.length.toLocaleString()} entries — more available below.</div>`
+    : `<div class="no-entries" style="font-size:12px;">Showing all ${entries.length.toLocaleString()} entries.</div>`;
+
+  const loadMoreBtn = hasMore
+    ? `<button class="import-btn" id="load-more-btn" style="margin:14px auto;display:flex;" onclick="loadMoreEntries()">Load more time logs</button>`
     : "";
 
   document.getElementById("student-list").innerHTML = `
     <div class="student-card fadeIn">${rows}</div>
-    ${shownNote}`;
+    ${countNote}
+    ${loadMoreBtn}`;
 }
 
 loadConfig();

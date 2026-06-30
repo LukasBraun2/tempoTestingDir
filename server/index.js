@@ -666,7 +666,7 @@ app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
 // ── Admin: flat feed of individual entries, most-recent first ────────────────
 app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", search = "", date = "", limit = "100" } = req.query;
+    const { project = "", period = "week", search = "", date = "", limit = "100", offset = "0" } = req.query;
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
 
@@ -689,7 +689,13 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
     if (project) entries = entries.filter(e => e.projectId === project);
 
     const totalEntries = entries.length;
-    const limited = entries.slice(0, Math.max(1, parseInt(limit, 10) || 100));
+    const offsetNum = Math.max(0, parseInt(offset, 10) || 0);
+    // limit=0 (or "all") means "no cap" — return every matching entry
+    const rawLimit   = String(limit).toLowerCase();
+    const limitNum   = (rawLimit === "all" || rawLimit === "0")
+      ? totalEntries
+      : Math.max(1, parseInt(limit, 10) || 100);
+    const limited = entries.slice(offsetNum, offsetNum + limitNum);
 
     const feed = limited.map(e => ({
       id:                e.id,
@@ -710,7 +716,13 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
       photo:             e.user_photo || null,
     }));
 
-    res.json({ entries: feed, totalEntries });
+    res.json({
+      entries: feed,
+      totalEntries,
+      offset: offsetNum,
+      limit: limitNum,
+      hasMore: offsetNum + feed.length < totalEntries,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Database error" });
