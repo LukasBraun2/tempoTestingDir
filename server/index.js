@@ -1,5 +1,27 @@
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
 
+// ── TEST-ONLY: freeze the server's perceived "now" ─────────────────────────────
+// Only activates if MOCK_NOW is explicitly set in the environment (e.g. on
+// tempotestingdir.com's Render env vars). Never set MOCK_NOW on the real
+// production service — this affects every request for every user.
+if (process.env.MOCK_NOW) {
+  const fixedMs = Date.parse(process.env.MOCK_NOW);
+  if (Number.isNaN(fixedMs)) {
+    console.warn(`⚠️  MOCK_NOW="${process.env.MOCK_NOW}" is not a valid date string, ignoring.`);
+  } else {
+    const RealDate = Date;
+    class MockedDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) return new RealDate(fixedMs);
+        return new RealDate(...args);
+      }
+      static now() { return fixedMs; }
+    }
+    global.Date = MockedDate;
+    console.log(`🕒  MOCK_NOW active — server perceives "now" as ${new RealDate(fixedMs).toISOString()}`);
+  }
+}
+
 const express     = require("express");
 const session     = require("express-session");
 const pgSessionInit = require("connect-pg-simple");
