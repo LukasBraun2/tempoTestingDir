@@ -308,6 +308,12 @@ const fmtTime = d => {
 };
 const fmtDate = d => {
   const dateStr = String(d).split("T")[0]; // "2024-05-01"
+  const today = new Date(), yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const todayStr     = today.toLocaleDateString("en-CA");
+  const yesterdayStr = yesterday.toLocaleDateString("en-CA");
+  if (dateStr === todayStr)     return "Today";
+  if (dateStr === yesterdayStr) return "Yesterday";
   const [y, mo, day] = dateStr.split("-").map(Number);
   const dd = new Date(y, mo - 1, day);
   return dd.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
