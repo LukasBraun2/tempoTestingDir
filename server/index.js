@@ -12,8 +12,16 @@ if (process.env.MOCK_NOW) {
     const RealDate = Date;
     class MockedDate extends RealDate {
       constructor(...args) {
-        if (args.length === 0) return new RealDate(fixedMs);
-        return new RealDate(...args);
+        // IMPORTANT: use super(...) so instances stay `instanceof Date`.
+        // Returning `new RealDate(...)` here would swap out `this` for a
+        // plain RealDate instance, breaking `instanceof Date` checks in
+        // every downstream library (this is what caused the
+        // "maxAge must be a number or Date" crash in express-session).
+        if (args.length === 0) {
+          super(fixedMs);
+        } else {
+          super(...args);
+        }
       }
       static now() { return fixedMs; }
     }
