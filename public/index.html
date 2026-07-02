@@ -495,7 +495,7 @@ window.logManual = async () => {
   await saveEntry({ desc: $("timer-desc").value || "Untitled", projectId: window.selectedProj, tags: [...window.selectedTags], start: startStr, end: endStr, duration: dur });
   resetInputs();
   $("manual-start").value = ""; $("manual-end").value = "";
-  $("manual-date").value = new Date().toISOString().split("T")[0];
+  $("manual-date").value = toLocalDate(new Date());
 };
 function showTimerErr(msg) { const el = $("timer-err"); el.textContent = msg; el.style.display = "block"; setTimeout(() => el.style.display = "none", 4000); }
 
@@ -511,7 +511,7 @@ window.toggleMode = () => {
   $("rec-badge").style.display    = "none";
   $("manual-badge").style.display = isManual ? "none" : "flex";
   if (!isManual && window.timerStart) { clearInterval(window.timerInterval); window.timerStart = null; }
-  if (!isManual) $("manual-date").value = new Date().toISOString().split("T")[0];
+  if (!isManual) $("manual-date").value = toLocalDate(new Date());
 };
 
 // ── API save / delete ─────────────────────────────────────────────────────────
