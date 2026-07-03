@@ -534,7 +534,10 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
       `SELECT COALESCE(SUM(duration),0)::int AS weeksecs FROM entries WHERE true ${range.where}`,
       range.params
     ));
-    ({ rows: r2 } = await pool.query("SELECT COUNT(*)::int AS totalentries FROM entries"));
+    ({ rows: r2 } = await pool.query(
+      `SELECT COUNT(*)::int AS totalentries FROM entries WHERE true ${range.where}`,
+      range.params
+    ));
     ({ rows: r3 } = await pool.query("SELECT COUNT(DISTINCT uid)::int AS totalstudents FROM entries"));
     ({ rows: r4 } = await pool.query(
       `SELECT COUNT(DISTINCT uid)::int AS weekstudents FROM entries WHERE true ${range.where}`,

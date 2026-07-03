@@ -421,6 +421,13 @@ async function loadStats() {
     else if (period === "all")    statAvgCard.querySelector(".stat-label").textContent = "Avg all time";
     else if (period === "month")  statAvgCard.querySelector(".stat-label").textContent = "Avg this month";
     else                          statAvgCard.querySelector(".stat-label").textContent = "Avg this week";
+
+    // ✅ Update "Total entries" card's sub-label to match selected period too
+    const statEntriesCard = document.getElementById("stat-entries").closest(".stat-card");
+    if (period === "day")         statEntriesCard.querySelector(".stat-sub").textContent = "on selected date";
+    else if (period === "all")    statEntriesCard.querySelector(".stat-sub").textContent = "all time";
+    else if (period === "month")  statEntriesCard.querySelector(".stat-sub").textContent = "this month";
+    else                          statEntriesCard.querySelector(".stat-sub").textContent = "this week";
   } catch(e) { console.error("Failed to load stats:", e); }
 }
 
