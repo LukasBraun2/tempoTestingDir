@@ -688,34 +688,40 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
 
-    const { rows } = await pool.query(`
-      SELECT e.*, u.name AS user_name, u.email AS user_email, u.photo AS user_photo
-      FROM entries e LEFT JOIN users u ON u.id = e.uid
-      ORDER BY e.start DESC
-    `);
-    let entries = rows.map(parseEntry);
+    // Build WHERE clause + params once, reuse for both the count and the page query.
+    const where  = [];
+    const params = [];
+    if (ps)       { params.push(ps.toISOString()); where.push(`e.start >= $${params.length}`); }
+    if (pe)       { params.push(pe.toISOString());  where.push(`e.start <= $${params.length}`); }
+    if (project)  { params.push(project);           where.push(`e.project_id = $${params.length}`); }
+    if (search)   { params.push(`%${search.toLowerCase()}%`); where.push(`(LOWER(u.name) LIKE $${params.length} OR LOWER(u.email) LIKE $${params.length})`); }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    if (search) {
-      const q = search.toLowerCase();
-      entries = entries.filter(e =>
-        (e.user_name || "").toLowerCase().includes(q) ||
-        (e.user_email || "").toLowerCase().includes(q)
-      );
-    }
-    if (ps)      entries = entries.filter(e => new Date(e.start) >= ps);
-    if (pe)      entries = entries.filter(e => new Date(e.start) <= pe);
-    if (project) entries = entries.filter(e => e.projectId === project);
+    const { rows: countRows } = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM entries e LEFT JOIN users u ON u.id = e.uid ${whereSql}`,
+      params
+    );
+    const totalEntries = countRows[0].total;
 
-    const totalEntries = entries.length;
     const offsetNum = Math.max(0, parseInt(offset, 10) || 0);
     // limit=0 (or "all") means "no cap" — return every matching entry
     const rawLimit   = String(limit).toLowerCase();
     const limitNum   = (rawLimit === "all" || rawLimit === "0")
       ? totalEntries
       : Math.max(1, parseInt(limit, 10) || 100);
-    const limited = entries.slice(offsetNum, offsetNum + limitNum);
 
-    const feed = limited.map(e => ({
+    const dataParams = [...params, limitNum, offsetNum];
+    const { rows } = await pool.query(
+      `SELECT e.*, u.name AS user_name, u.email AS user_email, u.photo AS user_photo
+       FROM entries e LEFT JOIN users u ON u.id = e.uid
+       ${whereSql}
+       ORDER BY e.start DESC
+       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+      dataParams
+    );
+    const entries = rows.map(parseEntry);
+
+    const feed = entries.map(e => ({
       id:                e.id,
       desc:              e.desc,
       tags:              e.tags,
