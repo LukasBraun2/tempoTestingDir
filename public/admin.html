@@ -85,7 +85,7 @@
   <div class="stats-bar">
     <div class="stat-card"><div class="stat-label">Total students</div><div class="stat-val mono" id="stat-students">&#x2014;</div><div class="stat-sub">logged in</div></div>
     <div class="stat-card"><div class="stat-label">Hours this week</div><div class="stat-val mono" id="stat-week">&#x2014;</div><div class="stat-sub">across all students</div></div>
-    <div class="stat-card"><div class="stat-label">Entries this week</div><div class="stat-val mono" id="stat-entries">&#x2014;</div><div class="stat-sub">across all students</div></div>
+    <div class="stat-card"><div class="stat-label">Total entries</div><div class="stat-val mono" id="stat-entries">&#x2014;</div><div class="stat-sub">all time</div></div>
     <div class="stat-card"><div class="stat-label">Avg this week</div><div class="stat-val mono" id="stat-avg">&#x2014;</div><div class="stat-sub">per active student</div></div>
   </div>
 
@@ -99,9 +99,9 @@
       <option value="">All projects</option>
     </select>
     <select class="filter-select" id="week-filter" onchange="onPeriodChange()">
-      <option value="week" selected>This week</option>
+      <option value="week">This week</option>
       <option value="month">This month</option>
-      <option value="all">All time</option>
+      <option value="all" selected>All time</option>
     </select>
     <!-- Calendar date picker -->
     <div class="cal-wrap" id="cal-wrap">
@@ -421,12 +421,6 @@ async function loadStats() {
     else if (period === "all")    statAvgCard.querySelector(".stat-label").textContent = "Avg all time";
     else if (period === "month")  statAvgCard.querySelector(".stat-label").textContent = "Avg this month";
     else                          statAvgCard.querySelector(".stat-label").textContent = "Avg this week";
-
-    const statEntriesCard = document.getElementById("stat-entries").closest(".stat-card");
-    if (period === "day")         statEntriesCard.querySelector(".stat-label").textContent = "Entries on date";
-    else if (period === "all")    statEntriesCard.querySelector(".stat-label").textContent = "Total entries";
-    else if (period === "month")  statEntriesCard.querySelector(".stat-label").textContent = "Entries this month";
-    else                          statEntriesCard.querySelector(".stat-label").textContent = "Entries this week";
   } catch(e) { console.error("Failed to load stats:", e); }
 }
 
