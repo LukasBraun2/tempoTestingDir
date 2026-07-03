@@ -428,6 +428,13 @@ async function loadStats() {
     else if (period === "all")    statEntriesCard.querySelector(".stat-sub").textContent = "all time";
     else if (period === "month")  statEntriesCard.querySelector(".stat-sub").textContent = "this month";
     else                          statEntriesCard.querySelector(".stat-sub").textContent = "this week";
+
+    // ✅ Update "Total students" card's sub-label to match selected period too
+    const statStudentsCard = document.getElementById("stat-students").closest(".stat-card");
+    if (period === "day")         statStudentsCard.querySelector(".stat-sub").textContent = "active on date";
+    else if (period === "all")    statStudentsCard.querySelector(".stat-sub").textContent = "logged in";
+    else if (period === "month")  statStudentsCard.querySelector(".stat-sub").textContent = "active this month";
+    else                          statStudentsCard.querySelector(".stat-sub").textContent = "active this week";
   } catch(e) { console.error("Failed to load stats:", e); }
 }
 

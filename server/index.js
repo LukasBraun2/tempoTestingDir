@@ -520,7 +520,7 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
 
-    let r1, r2, r3, r4;
+    let r1, r2, r4;
 
     const buildRange = (col) => {
       if (ps && pe) return { where: `AND ${col} >= $1 AND ${col} <= $2`, params: [ps.toISOString(), pe.toISOString()] };
@@ -538,7 +538,6 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
       `SELECT COUNT(*)::int AS totalentries FROM entries WHERE true ${range.where}`,
       range.params
     ));
-    ({ rows: r3 } = await pool.query("SELECT COUNT(DISTINCT uid)::int AS totalstudents FROM entries"));
     ({ rows: r4 } = await pool.query(
       `SELECT COUNT(DISTINCT uid)::int AS weekstudents FROM entries WHERE true ${range.where}`,
       range.params
@@ -546,8 +545,8 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
 
     const weekSecs      = r1[0].weeksecs;
     const totalEntries  = r2[0].totalentries;
-    const totalStudents = r3[0].totalstudents;
     const weekStudents  = r4[0].weekstudents;
+    const totalStudents = weekStudents; // now scoped to the selected period, not all-time
     const avgSecs       = weekStudents > 0 ? Math.round(weekSecs / weekStudents) : 0;
 
     res.json({
