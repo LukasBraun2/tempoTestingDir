@@ -10,17 +10,11 @@ const crypto      = require("crypto");
 const fs          = require("fs");
 const bcrypt      = require("bcrypt");
 const { Pool }    = require("pg");
-const { DateTime }= require("luxon");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT        = process.env.PORT || 3000;
 const DATA_DIR    = path.join(__dirname, "..", "data");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
-
-// Canonical timezone for all "day/week/month" boundary math and for
-// interpreting the naive (no-offset) start/end strings written by the
-// student-facing app. Existing rows were confirmed to be Pacific-local.
-const ORG_TZ = process.env.ORG_TZ || "America/Los_Angeles";
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -92,14 +86,6 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_entries_uid       ON entries(uid);
     CREATE INDEX IF NOT EXISTS idx_entries_start     ON entries(start);
     CREATE INDEX IF NOT EXISTS idx_entries_uid_start ON entries(uid, start);
-
-    -- Added for true-UTC timestamps. Nullable and NOT backfilled on purpose:
-    -- existing rows keep NULL here and continue to be interpreted from the
-    -- naive "start"/"end" text at query time (see effectiveStartUtcSql /
-    -- naiveToUtc below). Only newly-written entries populate these columns.
-    ALTER TABLE entries ADD COLUMN IF NOT EXISTS start_utc TIMESTAMPTZ;
-    ALTER TABLE entries ADD COLUMN IF NOT EXISTS end_utc   TIMESTAMPTZ;
-    CREATE INDEX IF NOT EXISTS idx_entries_start_utc ON entries(start_utc);
   `);
   console.log("✅  Database schema ready.");
 }
@@ -116,49 +102,6 @@ function parseEntry(row) {
 }
 
 const newId = () => crypto.randomUUID();
-
-// Accepts either:
-//  - a true UTC instant (has a "Z" or +HH:MM/-HH:MM offset) — from the
-//    fixed frontend, which now sends real timestamps, or
-//  - a naive "YYYY-MM-DDTHH:MM:SS" string with no offset — from any
-//    still-cached copy of the old frontend, which sent local-time text.
-// Returns { text, utc }: `text` is the naive Pacific-wall-clock string to
-// store in the legacy start/end TEXT columns (so fmtTime/fmtDate/CSV export
-// keep working unchanged), and `utc` is the true UTC instant for start_utc/end_utc.
-function parseIncomingTimestamp(value) {
-  if (!value) return { text: null, utc: null };
-  const hasOffset = /Z$/i.test(value) || /[+-]\d{2}:?\d{2}$/.test(value);
-  if (hasOffset) {
-    const utcDt = DateTime.fromISO(value, { zone: "utc" });
-    if (!utcDt.isValid) return { text: value, utc: null };
-    const text = utcDt.setZone(ORG_TZ).toFormat("yyyy-LL-dd'T'HH:mm:ss");
-    return { text, utc: utcDt.toJSDate() };
-  }
-  return { text: value, utc: naiveToUtc(value) };
-}
-
-// ── Timezone helpers ──────────────────────────────────────────────────────────
-// Interpret a naive "YYYY-MM-DDTHH:MM:SS" string (no offset) as wall-clock
-// time in ORG_TZ, and return the true UTC instant as a JS Date. Used to
-// populate start_utc/end_utc for newly-written entries, and as the in-JS
-// fallback for legacy rows that don't have start_utc yet.
-function naiveToUtc(naiveStr, zone = ORG_TZ) {
-  if (!naiveStr) return null;
-  const dt = DateTime.fromISO(String(naiveStr).slice(0, 19), { zone });
-  return dt.isValid ? dt.toUTC().toJSDate() : null;
-}
-
-// The true instant for an entry: prefer the persisted start_utc/end_utc
-// (new rows); fall back to interpreting the naive text as ORG_TZ (old rows).
-function effectiveStartUtc(e) { return e.start_utc ? new Date(e.start_utc) : naiveToUtc(e.start); }
-function effectiveEndUtc(e)   { return e.end_utc   ? new Date(e.end_utc)   : naiveToUtc(e.end); }
-
-// Same idea, but as a raw SQL expression so it can be used inside WHERE
-// clauses without pulling every row into JS first. Postgres's
-// "<naive timestamp> AT TIME ZONE zone" interprets the naive value as
-// wall-clock time in `zone` and returns the equivalent UTC instant.
-const UTC_START_SQL = `COALESCE(e.start_utc, (e.start::timestamp AT TIME ZONE '${ORG_TZ}'))`;
-const UTC_END_SQL   = `COALESCE(e.end_utc,   (e."end"::timestamp   AT TIME ZONE '${ORG_TZ}'))`;
 
 // ── Validate env ──────────────────────────────────────────────────────────────
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
@@ -386,14 +329,8 @@ app.get("/api/entries/list", requireAuth, async (req, res) => {
       const p = e.projectId ? PROJECTS[e.projectId] : null;
       dayMap[label].push({
         ...e,
-        // Org-timezone-formatted strings, kept as a fallback for any client
-        // that doesn't reformat these itself.
         startFormatted:    fmtTime(e.start),
         endFormatted:      fmtTime(e.end),
-        // True UTC instants so the client can (and now does) reformat
-        // start/end in the *viewer's own* local timezone instead.
-        startUtc:          effectiveStartUtc(e).toISOString(),
-        endUtc:            effectiveEndUtc(e).toISOString(),
         durationFormatted: fmtSec(e.duration),
         projectName:       p?.name  || null,
         projectColor:      p?.color || null,
@@ -433,16 +370,20 @@ app.get("/api/debug/entries", requireAdmin, async (req, res) => {
 // ── Entries: stats ────────────────────────────────────────────────────────────
 app.get("/api/entries/stats", requireAuth, async (req, res) => {
   try {
-    const todayStart = DateTime.now().setZone(ORG_TZ).startOf("day").toUTC().toISO();
-    const ws         = weekStart().toISOString();
+    const now = new Date();
+    const ws  = new Date(now);
+    ws.setDate(now.getDate() - now.getDay());
+    ws.setHours(0, 0, 0, 0);
+
+    const todayStart = new Date(now.toDateString()).toISOString();
 
     const { rows: todayRows } = await pool.query(
-      `SELECT COALESCE(SUM(duration),0)::int AS n FROM entries e WHERE uid = $1 AND ${UTC_START_SQL} >= $2`,
+      "SELECT COALESCE(SUM(duration),0)::int AS n FROM entries WHERE uid = $1 AND start >= $2",
       [req.user.id, todayStart]
     );
     const { rows: weekRows } = await pool.query(
-      `SELECT COALESCE(SUM(duration),0)::int AS n FROM entries e WHERE uid = $1 AND ${UTC_START_SQL} >= $2`,
-      [req.user.id, ws]
+      "SELECT COALESCE(SUM(duration),0)::int AS n FROM entries WHERE uid = $1 AND start >= $2",
+      [req.user.id, ws.toISOString()]
     );
 
     res.json({ todaySeconds: todayRows[0].n, weekSeconds: weekRows[0].n });
@@ -510,13 +451,11 @@ app.post("/api/entries", requireAuth, async (req, res) => {
 
   try {
     const id = newId();
-    const s = parseIncomingTimestamp(start);
-    const e2 = parseIncomingTimestamp(end);
     await pool.query(
-      `INSERT INTO entries (id, uid, "desc", project_id, tags, start, "end", duration, created, start_utc, end_utc)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      `INSERT INTO entries (id, uid, "desc", project_id, tags, start, "end", duration, created)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [id, req.user.id, desc || "Untitled", projectId || null,
-       JSON.stringify(tags || []), s.text, e2.text, duration, Date.now(), s.utc, e2.utc]
+       JSON.stringify(tags || []), start, end, duration, Date.now()]
     );
     const { rows } = await pool.query("SELECT * FROM entries WHERE id = $1", [id]);
     res.status(201).json(parseEntry(rows[0]));
@@ -536,32 +475,19 @@ app.patch("/api/entries/:id", requireAuth, async (req, res) => {
     const e = existing[0];
     const { desc, projectId, tags, start, end, duration } = req.body;
 
-    // Recompute start_utc/end_utc whenever start/end change, so edited
-    // entries (even ones originally written before this column existed)
-    // get a correct true-UTC instant going forward. Accepts either a real
-    // UTC timestamp (fixed frontend) or a legacy naive Pacific string.
-    const startParsed = start !== undefined ? parseIncomingTimestamp(start) : null;
-    const endParsed   = end   !== undefined ? parseIncomingTimestamp(end)   : null;
-    const nextStart = startParsed ? startParsed.text : e.start;
-    const nextEnd   = endParsed   ? endParsed.text   : e.end;
-    const startUtc  = startParsed ? startParsed.utc  : e.start_utc;
-    const endUtc    = endParsed   ? endParsed.utc    : e.end_utc;
-
     await pool.query(
       `UPDATE entries
-       SET "desc" = $1, project_id = $2, tags = $3, start = $4, "end" = $5, duration = $6, start_utc = $9, end_utc = $10
+       SET "desc" = $1, project_id = $2, tags = $3, start = $4, "end" = $5, duration = $6
        WHERE id = $7 AND uid = $8`,
       [
         desc       !== undefined ? desc       : e.desc,
         projectId  !== undefined ? projectId  : e.project_id,
         JSON.stringify(tags !== undefined ? tags : e.tags),
-        nextStart,
-        nextEnd,
+        start      !== undefined ? start      : e.start,
+        end        !== undefined ? end        : e.end,
         duration   !== undefined ? duration   : e.duration,
         req.params.id,
         req.user.id,
-        startUtc,
-        endUtc,
       ]
     );
 
@@ -596,26 +522,24 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
 
     let r1, r2, r4;
 
-    // Compare against the canonical-zone UTC instant (start_utc if present,
-    // else the naive text reinterpreted as ORG_TZ) instead of raw text.
-    const buildRange = (utcSql) => {
-      if (ps && pe) return { where: `AND ${utcSql} >= $1 AND ${utcSql} <= $2`, params: [ps.toISOString(), pe.toISOString()] };
-      if (ps)       return { where: `AND ${utcSql} >= $1`, params: [ps.toISOString()] };
+    const buildRange = (col) => {
+      if (ps && pe) return { where: `AND ${col} >= $1 AND ${col} <= $2`, params: [ps.toISOString(), pe.toISOString()] };
+      if (ps)       return { where: `AND ${col} >= $1`, params: [ps.toISOString()] };
       return         { where: "", params: [] };
     };
 
-    const range = buildRange(UTC_START_SQL);
+    const range = buildRange("start");
 
     ({ rows: r1 } = await pool.query(
-      `SELECT COALESCE(SUM(duration),0)::int AS weeksecs FROM entries e WHERE true ${range.where}`,
+      `SELECT COALESCE(SUM(duration),0)::int AS weeksecs FROM entries WHERE true ${range.where}`,
       range.params
     ));
     ({ rows: r2 } = await pool.query(
-      `SELECT COUNT(*)::int AS totalentries FROM entries e WHERE true ${range.where}`,
+      `SELECT COUNT(*)::int AS totalentries FROM entries WHERE true ${range.where}`,
       range.params
     ));
     ({ rows: r4 } = await pool.query(
-      `SELECT COUNT(DISTINCT uid)::int AS weekstudents FROM entries e WHERE true ${range.where}`,
+      `SELECT COUNT(DISTINCT uid)::int AS weekstudents FROM entries WHERE true ${range.where}`,
       range.params
     ));
 
@@ -671,17 +595,17 @@ app.get("/api/admin/students", requireAdmin, async (req, res) => {
       const allRows = entriesByUid[u.id] || [];
 
       let filtered = allRows;
-      if (ps) filtered = filtered.filter(e => effectiveStartUtc(e) >= ps);
-      if (pe) filtered = filtered.filter(e => effectiveStartUtc(e) <= pe);
+      if (ps) filtered = filtered.filter(e => new Date(e.start) >= ps);
+      if (pe) filtered = filtered.filter(e => new Date(e.start) <= pe);
       if (project) filtered = filtered.filter(e => e.projectId === project);
 
-      const weekRows = allRows.filter(e => effectiveStartUtc(e) >= ws);
+      const weekRows = allRows.filter(e => new Date(e.start) >= ws);
 
       const projTotals = {};
       allRows
         .filter(e => e.projectId && (!project || e.projectId === project))
-        .filter(e => !ps || effectiveStartUtc(e) >= ps)
-        .filter(e => !pe || effectiveStartUtc(e) <= pe)
+        .filter(e => !ps || new Date(e.start) >= ps)
+        .filter(e => !pe || new Date(e.start) <= pe)
         .forEach(e => { projTotals[e.projectId] = (projTotals[e.projectId] || 0) + e.duration; });
 
       const projBreakdown = Object.entries(projTotals)
@@ -732,8 +656,8 @@ app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
     );
     let filtered = rows.map(parseEntry);
 
-    if (ps)      filtered = filtered.filter(e => effectiveStartUtc(e) >= ps);
-    if (pe)      filtered = filtered.filter(e => effectiveStartUtc(e) <= pe);
+    if (ps)      filtered = filtered.filter(e => new Date(e.start) >= ps);
+    if (pe)      filtered = filtered.filter(e => new Date(e.start) <= pe);
     if (project) filtered = filtered.filter(e => e.projectId === project);
 
     const entries = filtered.slice(0, 50).map(e => ({
@@ -767,8 +691,8 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
     // Build WHERE clause + params once, reuse for both the count and the page query.
     const where  = [];
     const params = [];
-    if (ps)       { params.push(ps.toISOString()); where.push(`${UTC_START_SQL} >= $${params.length}`); }
-    if (pe)       { params.push(pe.toISOString());  where.push(`${UTC_START_SQL} <= $${params.length}`); }
+    if (ps)       { params.push(ps.toISOString()); where.push(`e.start >= $${params.length}`); }
+    if (pe)       { params.push(pe.toISOString());  where.push(`e.start <= $${params.length}`); }
     if (project)  { params.push(project);           where.push(`e.project_id = $${params.length}`); }
     if (search)   { params.push(`%${search.toLowerCase()}%`); where.push(`(LOWER(u.name) LIKE $${params.length} OR LOWER(u.email) LIKE $${params.length})`); }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -869,8 +793,8 @@ app.get("/api/admin/export", requireAdmin, async (req, res) => {
       .map(row => ({ ...parseEntry(row), userName: row.user_name, userEmail: row.user_email }))
       .filter(e => uids.has(e.uid));
 
-    if (ps)      entries = entries.filter(e => effectiveStartUtc(e) >= ps);
-    if (pe)      entries = entries.filter(e => effectiveStartUtc(e) <= pe);
+    if (ps)      entries = entries.filter(e => new Date(e.start) >= ps);
+    if (pe)      entries = entries.filter(e => new Date(e.start) <= pe);
     if (project) entries = entries.filter(e => e.projectId === project);
 
     const toDate     = iso => { const d=new Date(iso); return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`; };
@@ -955,14 +879,12 @@ app.post("/api/admin/import", requireAdmin, async (req, res) => {
       const durationSecs = Math.round((parseFloat(r.durationDecimal) || 0) * 3600);
       const projectId    = r.project ? (projByName[r.project.toLowerCase()] || null) : null;
       const tags         = r.tags ? r.tags.split(",").map(t => t.trim()).filter(Boolean) : [];
-      const startUtc     = naiveToUtc(startISO);
-      const endUtc       = naiveToUtc(endISO);
 
       await client.query(
-        `INSERT INTO entries (id, uid, "desc", project_id, tags, start, "end", duration, created, start_utc, end_utc)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        `INSERT INTO entries (id, uid, "desc", project_id, tags, start, "end", duration, created)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [newId(), user.id, r.description || "Untitled", projectId,
-         JSON.stringify(tags), startISO, endISO, durationSecs, Date.now(), startUtc, endUtc]
+         JSON.stringify(tags), startISO, endISO, durationSecs, Date.now()]
       );
       existingKeys.add(key);
       affectedUsers.add(user.id);
@@ -1014,25 +936,25 @@ function avatarInitials(name) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-// All boundary math below is anchored to ORG_TZ, not the server process's
-// ambient timezone — so "day/week/month" cutoffs are stable regardless of
-// what container/region this happens to be deployed in.
 function weekStart() {
-  // Sunday-start week, matching the previous getDay()-based behavior.
-  const now = DateTime.now().setZone(ORG_TZ);
-  const dowFromSunday = now.weekday % 7; // luxon: Mon=1..Sun=7 → Sun=0..Sat=6
-  return now.startOf("day").minus({ days: dowFromSunday }).toUTC().toJSDate();
+  const ws = new Date();
+  ws.setDate(ws.getDate() - ws.getDay());
+  ws.setHours(0, 0, 0, 0);
+  return ws;
 }
 
 function monthStart() {
-  return DateTime.now().setZone(ORG_TZ).startOf("month").toUTC().toJSDate();
+  const ms = new Date();
+  ms.setDate(1);
+  ms.setHours(0, 0, 0, 0);
+  return ms;
 }
 
 function periodStart(period, date) {
   if (period === "day" && date) {
-    // date is "YYYY-MM-DD"; treat it as midnight in ORG_TZ.
-    const dt = DateTime.fromISO(date, { zone: ORG_TZ }).startOf("day");
-    return dt.isValid ? dt.toUTC().toJSDate() : null;
+    // date is "YYYY-MM-DD"
+    const d = new Date(date + "T00:00:00");
+    return isNaN(d.getTime()) ? null : d;
   }
   if (period === "week")  return weekStart();
   if (period === "month") return monthStart();
@@ -1041,8 +963,8 @@ function periodStart(period, date) {
 
 function periodEnd(period, date) {
   if (period === "day" && date) {
-    const dt = DateTime.fromISO(date, { zone: ORG_TZ }).endOf("day");
-    return dt.isValid ? dt.toUTC().toJSDate() : null;
+    const d = new Date(date + "T23:59:59.999");
+    return isNaN(d.getTime()) ? null : d;
   }
   return null; // no upper bound for other periods
 }
