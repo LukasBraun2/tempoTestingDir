@@ -166,8 +166,7 @@
 
 <script>
 // ── Calendar picker ───────────────────────────────────────────────────────────
-let calRangeStart = null; // "YYYY-MM-DD" or null
-let calRangeEnd   = null; // "YYYY-MM-DD" or null (equals calRangeStart for a single day)
+let calSelectedDate = null; // "YYYY-MM-DD" or null
 let calViewYear  = new Date().getFullYear();
 let calViewMonth = new Date().getMonth(); // 0-based
 const CAL_MIN_YEAR = 2020;
@@ -209,18 +208,12 @@ function renderCal() {
   for (let d = 1; d <= daysInMonth; d++) {
     const dt = new Date(calViewYear, calViewMonth, d);
     const dtStr = toDateStr(dt);
-    const isToday     = dtStr === todayStr;
-    const isRangeStart = dtStr === calRangeStart;
-    const isRangeEnd   = calRangeEnd ? dtStr === calRangeEnd : false;
-    const isInRange    = calRangeStart && calRangeEnd && dtStr > calRangeStart && dtStr < calRangeEnd;
-    const isSelected  = isRangeStart || isRangeEnd;
-    const isDisabled  = dt > today || dt < minDate;
+    const isToday    = dtStr === todayStr;
+    const isSelected = dtStr === calSelectedDate;
+    const isDisabled = dt > today || dt < minDate;
     const cls = ['cal-day',
       isSelected ? 'selected' : '',
-      isInRange ? 'in-range' : '',
-      isRangeStart ? 'range-start' : '',
-      isRangeEnd ? 'range-end' : '',
-      isToday && !isSelected && !isInRange ? 'today' : '',
+      isToday && !isSelected ? 'today' : '',
       isDisabled ? 'disabled' : ''
     ].filter(Boolean).join(' ');
     const click = isDisabled ? '' : `onclick="calPickDay('${dtStr}')"`;
@@ -252,57 +245,22 @@ function calGoToday() {
   renderCal();
 }
 
-function calFmtDay(dateStr) {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  return `${MONTHS[m-1].slice(0,3)} ${d}, ${y}`;
-}
-
-function updateCalLabel() {
-  const label = document.getElementById('cal-label');
-  if (!calRangeStart) {
-    label.textContent = 'Pick date';
-  } else if (!calRangeEnd || calRangeEnd === calRangeStart) {
-    label.textContent = calFmtDay(calRangeStart);
-  } else {
-    label.textContent = `${calFmtDay(calRangeStart)} \u2013 ${calFmtDay(calRangeEnd)}`;
-  }
-}
-
-let calSuppressNextOutsideClick = false;
-
 function calPickDay(dateStr) {
-  if (!calRangeStart || calRangeEnd) {
-    // Starting a fresh selection
-    calRangeStart = dateStr;
-    calRangeEnd = null;
-    updateCalLabel();
-    document.getElementById('cal-btn').classList.add('active');
-    document.getElementById('cal-clear').style.display = '';
-    // renderCal() below replaces the grid's DOM nodes, which detaches the
-    // element that was just clicked. That detached node would otherwise look
-    // like an "outside" click to calOutsideClick and close the popup early.
-    calSuppressNextOutsideClick = true;
-    renderCal(); // keep popup open, awaiting the end of the range
-    return;
-  }
-  // We already have a start with no end yet — this click finishes the range
-  if (dateStr === calRangeStart) {
-    calRangeEnd = calRangeStart; // single day
-  } else if (dateStr < calRangeStart) {
-    calRangeEnd = calRangeStart;
-    calRangeStart = dateStr;
-  } else {
-    calRangeEnd = dateStr;
-  }
-  updateCalLabel();
+  calSelectedDate = dateStr;
+  // Format nicely for the button label
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const label = `${MONTHS[m-1].slice(0,3)} ${d}, ${y}`;
+  document.getElementById('cal-label').textContent = label;
+  document.getElementById('cal-btn').classList.add('active');
+  document.getElementById('cal-clear').style.display = '';
+  // Deactivate the period select visually (optional: reset to "all" so stats reflect full history)
   closeCal();
   loadData();
 }
 
 function clearDate(e) {
   e.stopPropagation();
-  calRangeStart = null;
-  calRangeEnd = null;
+  calSelectedDate = null;
   document.getElementById('cal-label').textContent = 'Pick date';
   document.getElementById('cal-btn').classList.remove('active');
   document.getElementById('cal-clear').style.display = 'none';
@@ -312,9 +270,9 @@ function clearDate(e) {
 function toggleCal() {
   const popup = document.getElementById('cal-popup');
   if (popup.classList.contains('hidden')) {
-    // Sync view to range start or today
-    if (calRangeStart) {
-      const [y, m] = calRangeStart.split('-').map(Number);
+    // Sync view to selected date or today
+    if (calSelectedDate) {
+      const [y, m] = calSelectedDate.split('-').map(Number);
       calViewYear = y; calViewMonth = m - 1;
     } else {
       calViewYear = new Date().getFullYear();
@@ -329,27 +287,18 @@ function toggleCal() {
 }
 
 function closeCal() {
-  // If a range start was picked but never finished (e.g. user clicked away),
-  // treat it as a single-day selection.
-  if (calRangeStart && !calRangeEnd) {
-    calRangeEnd = calRangeStart;
-    updateCalLabel();
-    loadData();
-  }
   document.getElementById('cal-popup').classList.add('hidden');
   document.removeEventListener('click', calOutsideClick);
 }
 
 function calOutsideClick(e) {
-  if (calSuppressNextOutsideClick) { calSuppressNextOutsideClick = false; return; }
   if (!e.target.closest('#cal-wrap')) closeCal();
 }
 
 function onPeriodChange() {
-  // Changing period filter clears any selected date range
-  if (calRangeStart) {
-    calRangeStart = null;
-    calRangeEnd = null;
+  // Changing period filter clears any selected date
+  if (calSelectedDate) {
+    calSelectedDate = null;
     document.getElementById('cal-label').textContent = 'Pick date';
     document.getElementById('cal-btn').classList.remove('active');
     document.getElementById('cal-clear').style.display = 'none';
@@ -363,10 +312,9 @@ function buildParams(extras = {}) {
     project: document.getElementById('proj-filter').value,
     search:  (extras.search !== undefined ? extras.search : (document.getElementById('search-input')?.value || '')),
   };
-  if (calRangeStart) {
+  if (calSelectedDate) {
     base.period = 'day';
-    base.date   = calRangeStart;
-    if (calRangeEnd && calRangeEnd !== calRangeStart) base.dateEnd = calRangeEnd;
+    base.date   = calSelectedDate;
   } else {
     base.period = document.getElementById('week-filter').value;
   }
@@ -450,8 +398,7 @@ function showApp() {
 
 // ── Data loading ──────────────────────────────────────────────────────────────
 async function loadStats() {
-  const period = calRangeStart ? 'day' : document.getElementById("week-filter").value;
-  const isRange = !!(calRangeStart && calRangeEnd && calRangeEnd !== calRangeStart);
+  const period = calSelectedDate ? 'day' : document.getElementById("week-filter").value;
   const params = buildParams({ search: '' });
   try {
     const res = await fetch(`${API}/api/admin/stats?` + params);
@@ -464,27 +411,27 @@ async function loadStats() {
 
     // ✅ Update label to match selected period
     const statWeekCard = document.getElementById("stat-week").closest(".stat-card");
-    if (period === "day")         statWeekCard.querySelector(".stat-label").textContent = isRange ? "Hours in range" : "Hours on date";
+    if (period === "day")         statWeekCard.querySelector(".stat-label").textContent = "Hours on date";
     else if (period === "all")    statWeekCard.querySelector(".stat-label").textContent = "Hours all time";
     else if (period === "month")  statWeekCard.querySelector(".stat-label").textContent = "Hours this month";
     else                          statWeekCard.querySelector(".stat-label").textContent = "Hours this week";
 
     const statAvgCard = document.getElementById("stat-avg").closest(".stat-card");
-    if (period === "day")         statAvgCard.querySelector(".stat-label").textContent = isRange ? "Avg in range" : "Avg on date";
+    if (period === "day")         statAvgCard.querySelector(".stat-label").textContent = "Avg on date";
     else if (period === "all")    statAvgCard.querySelector(".stat-label").textContent = "Avg all time";
     else if (period === "month")  statAvgCard.querySelector(".stat-label").textContent = "Avg this month";
     else                          statAvgCard.querySelector(".stat-label").textContent = "Avg this week";
 
     // ✅ Update "Total entries" card's sub-label to match selected period too
     const statEntriesCard = document.getElementById("stat-entries").closest(".stat-card");
-    if (period === "day")         statEntriesCard.querySelector(".stat-sub").textContent = isRange ? "in selected range" : "on selected date";
+    if (period === "day")         statEntriesCard.querySelector(".stat-sub").textContent = "on selected date";
     else if (period === "all")    statEntriesCard.querySelector(".stat-sub").textContent = "all time";
     else if (period === "month")  statEntriesCard.querySelector(".stat-sub").textContent = "this month";
     else                          statEntriesCard.querySelector(".stat-sub").textContent = "this week";
 
     // ✅ Update "Total students" card's sub-label to match selected period too
     const statStudentsCard = document.getElementById("stat-students").closest(".stat-card");
-    if (period === "day")         statStudentsCard.querySelector(".stat-sub").textContent = isRange ? "active in range" : "active on date";
+    if (period === "day")         statStudentsCard.querySelector(".stat-sub").textContent = "active on date";
     else if (period === "all")    statStudentsCard.querySelector(".stat-sub").textContent = "logged in";
     else if (period === "month")  statStudentsCard.querySelector(".stat-sub").textContent = "active this month";
     else                          statStudentsCard.querySelector(".stat-sub").textContent = "active this week";
