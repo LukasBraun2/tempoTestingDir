@@ -247,6 +247,9 @@ window.statsBase      = { todaySeconds: 0, weekSeconds: 0 };
 const fmt      = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60; return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`; };
 const toTimeStr = d => { const dt=new Date(d); return `${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}`; };
 const toLocalISO = d => { const dt = new Date(d); const off = dt.getTimezoneOffset() * 60000; return new Date(dt - off).toISOString().slice(0, -1); };
+// True UTC instant, timezone-unambiguous. Used for saving entries so the
+// server always gets a real instant instead of a stripped local-time string.
+const toUtcISO = d => new Date(d).toISOString();
 const toLocalDate = d => { const dt=new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`; };
 const $        = id => document.getElementById(id);
 
@@ -522,7 +525,7 @@ async function saveEntry(e) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         desc: e.desc, projectId: e.projectId, tags: e.tags,
-        start: toLocalISO(e.start), end: toLocalISO(e.end),
+        start: toUtcISO(e.start), end: toUtcISO(e.end),
         duration: e.duration,
       }),
     });
@@ -582,7 +585,7 @@ window.saveEdit = async () => {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ desc: $("edit-desc").value,
         projectId: $("edit-proj").value || null, tags,
-        start: toLocalISO(newStart), end: toLocalISO(newEnd), duration: dur }),
+        start: toUtcISO(newStart), end: toUtcISO(newEnd), duration: dur }),
     });
     if (!res.ok) throw new Error(await res.text());
     await loadEntries();
