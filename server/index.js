@@ -386,14 +386,8 @@ app.get("/api/entries/list", requireAuth, async (req, res) => {
       const p = e.projectId ? PROJECTS[e.projectId] : null;
       dayMap[label].push({
         ...e,
-        // Org-timezone-formatted strings, kept as a fallback for any client
-        // that doesn't reformat these itself.
         startFormatted:    fmtTime(e.start),
         endFormatted:      fmtTime(e.end),
-        // True UTC instants so the client can (and now does) reformat
-        // start/end in the *viewer's own* local timezone instead.
-        startUtc:          effectiveStartUtc(e).toISOString(),
-        endUtc:            effectiveEndUtc(e).toISOString(),
         durationFormatted: fmtSec(e.duration),
         projectName:       p?.name  || null,
         projectColor:      p?.color || null,
