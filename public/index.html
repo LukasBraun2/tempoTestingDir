@@ -245,9 +245,21 @@ window.statsBase      = { todaySeconds: 0, weekSeconds: 0 };
 
 // ── Helpers (live timer display + edit modal only) ────────────────────────────
 const fmt      = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60; return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`; };
+// new Date(d) auto-handles both cases we store: a naive "YYYY-MM-DDTHH:mm"
+// string (no zone) is parsed as literal local wall-clock time with no
+// conversion — exactly how legacy entries must keep behaving — while a real
+// ISO string with "Z"/offset is parsed as an absolute instant and these
+// getters return it converted into *this* browser's own local timezone.
 const toTimeStr = d => { const dt=new Date(d); return `${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}`; };
-const toLocalISO = d => { const dt = new Date(d); const off = dt.getTimezoneOffset() * 60000; return new Date(dt - off).toISOString().slice(0, -1); };
 const toLocalDate = d => { const dt=new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`; };
+// Used only when SAVING an entry: turns a Date (or date-ish string) into a
+// real, timezone-aware ISO instant ("...Z") so everything logged from now on
+// carries its timezone. Entries already in the database keep whatever naive
+// string they were saved with — this is never applied retroactively.
+const toISOZ = d => new Date(d).toISOString();
+// This browser's IANA timezone, sent to the server so it can render
+// newly-created (timezone-aware) entries back in the viewer's own local time.
+const CLIENT_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const $        = id => document.getElementById(id);
 
 // ── Sidebar / nav ─────────────────────────────────────────────────────────────
@@ -332,7 +344,7 @@ async function loadEntries() {
   $("db-loading").style.display = "block";
   try {
     const [listRes, statsRes] = await Promise.all([
-      fetch(`${API}/api/entries/list`),
+      fetch(`${API}/api/entries/list?tz=${encodeURIComponent(CLIENT_TZ)}`),
       fetch(`${API}/api/entries/stats`),
     ]);
     window.entryDays = await listRes.json();
@@ -489,10 +501,13 @@ window.logManual = async () => {
   const ms = $("manual-start").value, me = $("manual-end").value, md = $("manual-date").value;
   if (!ms || !me) { showTimerErr("Please set both start and end time."); return; }
   if (!md)        { showTimerErr("Please select a date."); return; }
-  const startStr = md + "T" + ms, endStr = md + "T" + me;
-  const dur = Math.floor((new Date(startStr) - new Date(endStr)) / -1000);
+  // Interpreting "date + time" with `new Date(...)` (no zone suffix) reads it
+  // as this browser's local wall-clock moment, so the instant is correct;
+  // saveEntry() then converts it to a real timezone-aware ISO string.
+  const startDate = new Date(md + "T" + ms), endDate = new Date(md + "T" + me);
+  const dur = Math.floor((endDate - startDate) / 1000);
   if (dur < 0) { showTimerErr("End time must be after start time."); return; }
-  await saveEntry({ desc: $("timer-desc").value || "Untitled", projectId: window.selectedProj, tags: [...window.selectedTags], start: startStr, end: endStr, duration: dur });
+  await saveEntry({ desc: $("timer-desc").value || "Untitled", projectId: window.selectedProj, tags: [...window.selectedTags], start: startDate, end: endDate, duration: dur });
   resetInputs();
   $("manual-start").value = ""; $("manual-end").value = "";
   $("manual-date").value = toLocalDate(new Date());
@@ -522,7 +537,7 @@ async function saveEntry(e) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         desc: e.desc, projectId: e.projectId, tags: e.tags,
-        start: toLocalISO(e.start), end: toLocalISO(e.end),
+        start: toISOZ(e.start), end: toISOZ(e.end),
         duration: e.duration,
       }),
     });
@@ -582,7 +597,7 @@ window.saveEdit = async () => {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ desc: $("edit-desc").value,
         projectId: $("edit-proj").value || null, tags,
-        start: toLocalISO(newStart), end: toLocalISO(newEnd), duration: dur }),
+        start: toISOZ(newStart), end: toISOZ(newEnd), duration: dur }),
     });
     if (!res.ok) throw new Error(await res.text());
     await loadEntries();

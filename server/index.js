@@ -298,7 +298,27 @@ app.get("/api/auth/admin/check", (req, res) => {
 // ── Formatting helpers ────────────────────────────────────────────────────────
 const fmtSec   = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60; return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`; };
 const fmtShort = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h>0?`${h}h ${m}m`:`${m}m`; };
-const fmtTime = d => {
+
+// ── Timezone handling ─────────────────────────────────────────────────────────
+// Entries created before this change store "start"/"end" as naive local
+// wall-clock strings (e.g. "2024-05-01T14:30:00.000") with no zone info —
+// they must keep displaying exactly as entered, forever. Entries created
+// from now on are stored as real, unambiguous instants (an ISO string
+// ending in "Z" or a "+HH:MM"/"-HH:MM" offset). hasTZInfo() tells the two
+// apart so old rows are never touched or reinterpreted.
+const PACIFIC_TZ = "America/Los_Angeles";
+const hasTZInfo  = v => typeof v === "string" && /(Z|[+-]\d{2}:?\d{2})$/.test(v.trim());
+
+// `tz` is only consulted for timezone-aware values; naive values always
+// fall back to the original string-parsing behavior so nothing about
+// previously-saved entries changes.
+const fmtTime = (d, tz) => {
+  if (hasTZInfo(d)) {
+    return new Date(d).toLocaleTimeString("en-US", {
+      hour12: true, hour: "2-digit", minute: "2-digit", second: "2-digit",
+      timeZone: tz || PACIFIC_TZ,
+    });
+  }
   const t = String(d).split("T")[1] || "";
   const [h, m] = t.split(":");
   const hour = parseInt(h, 10);
@@ -306,16 +326,35 @@ const fmtTime = d => {
   const h12  = hour % 12 === 0 ? 12 : hour % 12;
   return `${h12}:${m} ${ampm}`;
 };
-const fmtDate = d => {
+const fmtDate = (d, tz) => {
+  if (hasTZInfo(d)) {
+    return new Date(d).toLocaleDateString("en-US", {
+      weekday: "long", month: "short", day: "numeric", timeZone: tz || PACIFIC_TZ,
+    });
+  }
   const dateStr = String(d).split("T")[0]; // "2024-05-01"
   const [y, mo, day] = dateStr.split("-").map(Number);
   const dd = new Date(y, mo - 1, day);
   return dd.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
 };
+const fmtDateShort = (d, tz) => {
+  if (hasTZInfo(d)) {
+    return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: tz || PACIFIC_TZ });
+  }
+  const dateStr = String(d).split("T")[0];
+  const [y, mo, day] = dateStr.split("-").map(Number);
+  return new Date(y, mo - 1, day).toLocaleDateString([], { month: "short", day: "numeric" });
+};
 
 // ── Entries: list ─────────────────────────────────────────────────────────────
 app.get("/api/entries/list", requireAuth, async (req, res) => {
   try {
+    // The client sends its own IANA timezone (e.g. "America/Denver") so that
+    // timezone-aware entries (created after this feature shipped) render in
+    // *that browser's* local time. Naive/legacy entries ignore this entirely
+    // and keep displaying exactly as they were entered.
+    const clientTz = typeof req.query.tz === "string" && req.query.tz ? req.query.tz : undefined;
+
     const { rows } = await pool.query(
       'SELECT * FROM entries WHERE uid = $1 ORDER BY start DESC',
       [req.user.id]
@@ -324,13 +363,13 @@ app.get("/api/entries/list", requireAuth, async (req, res) => {
     const dayMap  = {};
 
     entries.forEach(e => {
-      const label = fmtDate(e.start);
+      const label = fmtDate(e.start, clientTz);
       if (!dayMap[label]) dayMap[label] = [];
       const p = e.projectId ? PROJECTS[e.projectId] : null;
       dayMap[label].push({
         ...e,
-        startFormatted:    fmtTime(e.start),
-        endFormatted:      fmtTime(e.end),
+        startFormatted:    fmtTime(e.start, clientTz),
+        endFormatted:      fmtTime(e.end, clientTz),
         durationFormatted: fmtSec(e.duration),
         projectName:       p?.name  || null,
         projectColor:      p?.color || null,
@@ -666,7 +705,7 @@ app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
       tags:              e.tags,
       projectId:         e.projectId,
       duration:          e.duration,
-      dateShort:         new Date(e.start).toLocaleDateString([], { month: "short", day: "numeric" }),
+      dateShort:         fmtDateShort(e.start),
       startFormatted:    fmtTime(e.start),
       endFormatted:      fmtTime(e.end),
       durationFormatted: fmtSec(e.duration),
@@ -727,7 +766,7 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
       tags:              e.tags,
       projectId:         e.projectId,
       duration:          e.duration,
-      dateShort:         new Date(e.start).toLocaleDateString([], { month: "short", day: "numeric" }),
+      dateShort:         fmtDateShort(e.start),
       startFormatted:    fmtTime(e.start),
       endFormatted:      fmtTime(e.end),
       durationFormatted: fmtSec(e.duration),
@@ -797,8 +836,20 @@ app.get("/api/admin/export", requireAdmin, async (req, res) => {
     if (pe)      entries = entries.filter(e => new Date(e.start) <= pe);
     if (project) entries = entries.filter(e => e.projectId === project);
 
-    const toDate     = iso => { const d=new Date(iso); return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`; };
-    const toTime     = iso => new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    const toDate = iso => {
+      if (hasTZInfo(iso)) {
+        const parts = new Intl.DateTimeFormat("en-US", {
+          timeZone: PACIFIC_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+        }).formatToParts(new Date(iso));
+        const get = t => parts.find(p => p.type === t).value;
+        return `${get("month")}/${get("day")}/${get("year")}`;
+      }
+      const d = new Date(iso);
+      return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`;
+    };
+    const toTime = iso => hasTZInfo(iso)
+      ? new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"2-digit",minute:"2-digit",second:"2-digit",timeZone:PACIFIC_TZ})
+      : new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"2-digit",minute:"2-digit",second:"2-digit"});
     const toDuration = secs => { const h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60),s=secs%60; return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`; };
     const escape     = v => `"${String(v??"").replace(/"/g,'""')}"`;
 
