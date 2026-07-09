@@ -247,7 +247,13 @@ window.statsBase      = { todaySeconds: 0, weekSeconds: 0 };
 const fmt      = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60; return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`; };
 const toTimeStr = d => { const dt=new Date(d); return `${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}`; };
 const toLocalISO = d => { const dt = new Date(d); const off = dt.getTimezoneOffset() * 60000; return new Date(dt - off).toISOString().slice(0, -1); };
+// True UTC instant, timezone-unambiguous. Used for saving entries so the
+// server always gets a real instant instead of a stripped local-time string.
+const toUtcISO = d => new Date(d).toISOString();
 const toLocalDate = d => { const dt=new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`; };
+// Formats a true UTC instant (e.g. "2024-05-01T21:30:00.000Z") in the
+// *viewer's own* browser timezone, no zone argument = local by default.
+const fmtLocalTime = iso => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
 const $        = id => document.getElementById(id);
 
 // ── Sidebar / nav ─────────────────────────────────────────────────────────────
@@ -337,6 +343,12 @@ async function loadEntries() {
     ]);
     window.entryDays = await listRes.json();
     window.statsBase = await statsRes.json();
+    // Override the server's org-timezone-formatted strings with times
+    // formatted in the viewer's own local timezone.
+    window.entryDays.forEach(day => day.groups.forEach(group => group.entries.forEach(e => {
+      if (e.startUtc) e.startFormatted = fmtLocalTime(e.startUtc);
+      if (e.endUtc)   e.endFormatted   = fmtLocalTime(e.endUtc);
+    })));
     $("db-loading").style.display = "none";
     renderEntries();
     updateTopStats();
@@ -522,7 +534,7 @@ async function saveEntry(e) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         desc: e.desc, projectId: e.projectId, tags: e.tags,
-        start: toLocalISO(e.start), end: toLocalISO(e.end),
+        start: toUtcISO(e.start), end: toUtcISO(e.end),
         duration: e.duration,
       }),
     });
@@ -544,9 +556,12 @@ window.openEdit = entry => {
   $("edit-id").value    = entry.id;
   $("edit-desc").value  = entry.desc || "";
   $("edit-proj").value  = entry.projectId || "";
-  $("edit-date").value  = toLocalDate(entry.start);
-  $("edit-start").value = toTimeStr(entry.start);
-  $("edit-end").value   = toTimeStr(entry.end);
+  // Prefer the true UTC instant (startUtc/endUtc) so the date/time inputs
+  // reflect this viewer's own local time; fall back to the legacy naive
+  // fields for any older cached response that doesn't include them yet.
+  $("edit-date").value  = toLocalDate(entry.startUtc || entry.start);
+  $("edit-start").value = toTimeStr(entry.startUtc || entry.start);
+  $("edit-end").value   = toTimeStr(entry.endUtc || entry.end);
   $("edit-time-err").style.display = "none";
   updateEditDur();
   const wrap = $("edit-tags-wrap"); wrap.innerHTML = "";
@@ -582,7 +597,7 @@ window.saveEdit = async () => {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ desc: $("edit-desc").value,
         projectId: $("edit-proj").value || null, tags,
-        start: toLocalISO(newStart), end: toLocalISO(newEnd), duration: dur }),
+        start: toUtcISO(newStart), end: toUtcISO(newEnd), duration: dur }),
     });
     if (!res.ok) throw new Error(await res.text());
     await loadEntries();
