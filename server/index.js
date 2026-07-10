@@ -315,7 +315,7 @@ const hasTZInfo  = v => typeof v === "string" && /(Z|[+-]\d{2}:?\d{2})$/.test(v.
 const fmtTime = (d, tz) => {
   if (hasTZInfo(d)) {
     return new Date(d).toLocaleTimeString("en-US", {
-      hour12: true, hour: "numeric", minute: "2-digit", second: "2-digit",
+      hour12: true, hour: "numeric", minute: "2-digit",
       timeZone: tz || PACIFIC_TZ,
     });
   }
@@ -875,8 +875,8 @@ app.get("/api/admin/export", requireAdmin, async (req, res) => {
       return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`;
     };
     const toTime = iso => hasTZInfo(iso)
-      ? new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"numeric",minute:"2-digit",second:"2-digit",timeZone:PACIFIC_TZ})
-      : new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"numeric",minute:"2-digit",second:"2-digit"});
+      ? new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"numeric",minute:"2-digit",timeZone:PACIFIC_TZ})
+      : new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"numeric",minute:"2-digit"});
     const toDuration = secs => { const h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60),s=secs%60; return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`; };
     const escape     = v => `"${String(v??"").replace(/"/g,'""')}"`;
 
