@@ -67,6 +67,10 @@
       entries in local time. This only reflects that one-time reading per entry, not live location tracking.
       Students who show more than one timezone across their entries are flagged.
     </p>
+    <div class="search-wrap" style="max-width:320px;margin-bottom:16px;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" placeholder="Search students..." id="tz-search-input" oninput="renderTimezones()"/>
+    </div>
     <table class="tz-table">
       <thead>
         <tr>
@@ -129,6 +133,8 @@ function initials(name) {
   return (name || "?").split(" ").filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("");
 }
 
+let allStudents = [];
+
 async function loadTimezones() {
   const tbody = document.getElementById("tz-tbody");
   try {
@@ -136,42 +142,61 @@ async function loadTimezones() {
     if (!res.ok) { signOutAdmin(); return; }
     const data = await res.json();
 
+    allStudents = data.students;
+
     document.getElementById("stat-students").textContent    = data.students.length;
     document.getElementById("stat-with-tz").textContent     = data.totalWithTz;
     document.getElementById("stat-without-tz").textContent  = data.totalWithoutTz;
     document.getElementById("stat-multi").textContent       = data.students.filter(s => s.multiTz).length;
 
-    if (!data.students.length) {
-      tbody.innerHTML = `<tr><td colspan="5" class="loading">No log entries yet.</td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = data.students.map(s => {
-      const also = s.timezones.slice(1);
-      const lastTzRow = s.timezones.find(t => t.tz === s.lastSeenTz);
-      return `
-        <tr>
-          <td>
-            <div class="tz-student">
-              ${s.photo
-                ? `<img class="tz-avatar" src="${s.photo}"/>`
-                : `<div class="tz-avatar" style="background:${s.avatarColor}">${initials(s.displayName)}</div>`}
-              <div>
-                <div class="tz-name">${s.displayName}${s.multiTz ? '<span class="tz-flag">Multiple zones</span>' : ""}</div>
-                <div class="tz-email">${s.email}</div>
-              </div>
-            </div>
-          </td>
-          <td class="tz-primary">${s.primaryTz || '<span class="tz-none">—</span>'}</td>
-          <td>${also.length ? also.map(t => `<div class="tz-also">${t.tz} · ${t.count} ${t.count === 1 ? "entry" : "entries"}</div>`).join("") : '<span class="tz-none">—</span>'}</td>
-          <td class="tz-primary">${lastTzRow ? `${lastTzRow.tz}<div class="tz-also">${new Date(lastTzRow.lastSeen).toLocaleString()}</div>` : '<span class="tz-none">—</span>'}</td>
-          <td class="mono">${s.totalEntries}${s.missingTz ? `<div class="tz-also">${s.missingTz} without a zone</div>` : ""}</td>
-        </tr>`;
-    }).join("");
+    renderTimezones();
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="5" class="loading">Failed to load.</td></tr>`;
     console.error(err);
   }
+}
+
+function renderTimezones() {
+  const tbody = document.getElementById("tz-tbody");
+  const q = (document.getElementById("tz-search-input").value || "").trim().toLowerCase();
+
+  const students = !q ? allStudents : allStudents.filter(s =>
+    s.displayName.toLowerCase().includes(q) ||
+    s.email.toLowerCase().includes(q) ||
+    s.timezones.some(t => t.tz.toLowerCase().includes(q))
+  );
+
+  if (!allStudents.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="loading">No log entries yet.</td></tr>`;
+    return;
+  }
+  if (!students.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="loading">No students match "${q}".</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = students.map(s => {
+    const also = s.timezones.slice(1);
+    const lastTzRow = s.timezones.find(t => t.tz === s.lastSeenTz);
+    return `
+      <tr>
+        <td>
+          <div class="tz-student">
+            ${s.photo
+              ? `<img class="tz-avatar" src="${s.photo}"/>`
+              : `<div class="tz-avatar" style="background:${s.avatarColor}">${initials(s.displayName)}</div>`}
+            <div>
+              <div class="tz-name">${s.displayName}${s.multiTz ? '<span class="tz-flag">Multiple zones</span>' : ""}</div>
+              <div class="tz-email">${s.email}</div>
+            </div>
+          </div>
+        </td>
+        <td class="tz-primary">${s.primaryTz || '<span class="tz-none">—</span>'}</td>
+        <td>${also.length ? also.map(t => `<div class="tz-also">${t.tz} · ${t.count} ${t.count === 1 ? "entry" : "entries"}</div>`).join("") : '<span class="tz-none">—</span>'}</td>
+        <td class="tz-primary">${lastTzRow ? `${lastTzRow.tz}<div class="tz-also">${new Date(lastTzRow.lastSeen).toLocaleString()}</div>` : '<span class="tz-none">—</span>'}</td>
+        <td class="mono">${s.totalEntries}${s.missingTz ? `<div class="tz-also">${s.missingTz} without a zone</div>` : ""}</td>
+      </tr>`;
+  }).join("");
 }
 </script>
 </body>
