@@ -80,13 +80,17 @@ async function initDb() {
       start      TEXT NOT NULL,
       "end"      TEXT NOT NULL,
       duration   INTEGER NOT NULL,
-      created    BIGINT NOT NULL
+      created    BIGINT NOT NULL,
+      tz         TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_entries_uid       ON entries(uid);
     CREATE INDEX IF NOT EXISTS idx_entries_start     ON entries(start);
     CREATE INDEX IF NOT EXISTS idx_entries_uid_start ON entries(uid, start);
   `);
+  // Older databases created before the `tz` column existed won't get it from
+  // CREATE TABLE IF NOT EXISTS, so add it explicitly if missing.
+  await pool.query(`ALTER TABLE entries ADD COLUMN IF NOT EXISTS tz TEXT;`);
   console.log("✅  Database schema ready.");
 }
 
@@ -509,17 +513,21 @@ app.get("/api/entries", requireAuth, async (req, res) => {
 
 // ── Entries: create ───────────────────────────────────────────────────────────
 app.post("/api/entries", requireAuth, async (req, res) => {
-  const { desc, projectId, tags, start, end, duration } = req.body;
+  const { desc, projectId, tags, start, end, duration, tz } = req.body;
   if (!start || !end || duration == null)
     return res.status(400).json({ error: "Missing fields" });
+
+  // Only accept plausible IANA zone strings (e.g. "America/Denver", "UTC");
+  // anything else is dropped rather than stored.
+  const clientTz = typeof tz === "string" && /^[A-Za-z0-9_+\-\/]{1,64}$/.test(tz) ? tz : null;
 
   try {
     const id = newId();
     await pool.query(
-      `INSERT INTO entries (id, uid, "desc", project_id, tags, start, "end", duration, created)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      `INSERT INTO entries (id, uid, "desc", project_id, tags, start, "end", duration, created, tz)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [id, req.user.id, desc || "Untitled", projectId || null,
-       JSON.stringify(tags || []), start, end, duration, Date.now()]
+       JSON.stringify(tags || []), start, end, duration, Date.now(), clientTz]
     );
     const { rows } = await pool.query("SELECT * FROM entries WHERE id = $1", [id]);
     res.status(201).json(parseEntry(rows[0]));
@@ -698,6 +706,75 @@ app.get("/api/admin/students", requireAdmin, async (req, res) => {
 
     students.sort((a, b) => b.weekSeconds - a.weekSeconds);
     res.json(students);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+// ── Admin: timezones entries were logged from ────────────────────────────────
+// Surfaces which IANA timezone each student's browser reported at the moment
+// they saved a log entry. Useful for spotting students logging from an
+// unexpected zone (e.g. a supposed-local student whose entries all come in
+// from a different region), not for tracking anyone's real-time location —
+// we only have whatever zone was recorded on each past entry.
+app.get("/api/admin/timezones", requireAdmin, async (req, res) => {
+  try {
+    const { rows: users }   = await pool.query("SELECT * FROM users");
+    const { rows: entries } = await pool.query(
+      "SELECT uid, tz, start FROM entries ORDER BY start DESC"
+    );
+
+    const byUid = {};
+    for (const e of entries) {
+      (byUid[e.uid] = byUid[e.uid] || []).push(e);
+    }
+
+    let totalWithTz = 0, totalWithoutTz = 0;
+
+    const students = users
+      .map(u => {
+        const rows = byUid[u.id] || [];
+        if (!rows.length) return null;
+
+        const tzCounts = {}; // tz -> { count, lastSeen }
+        let missing = 0;
+        for (const r of rows) {
+          if (!r.tz) { missing++; continue; }
+          if (!tzCounts[r.tz]) tzCounts[r.tz] = { tz: r.tz, count: 0, lastSeen: r.start };
+          tzCounts[r.tz].count++;
+          if (new Date(r.start) > new Date(tzCounts[r.tz].lastSeen)) tzCounts[r.tz].lastSeen = r.start;
+        }
+
+        totalWithTz    += rows.length - missing;
+        totalWithoutTz += missing;
+
+        const timezones = Object.values(tzCounts).sort((a, b) => b.count - a.count);
+
+        return {
+          uid:          u.id,
+          displayName:  u.name,
+          email:        u.email,
+          avatarColor:  avatarColor(u.email),
+          initials:     avatarInitials(u.name),
+          photo:        u.photo,
+          totalEntries: rows.length,
+          missingTz:    missing,
+          timezones,                                   // sorted, most-used first
+          primaryTz:    timezones[0]?.tz || null,
+          lastSeenTz:   [...timezones].sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen))[0]?.tz || null,
+          multiTz:      timezones.length > 1,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (b.multiTz - a.multiTz) || (b.totalEntries - a.totalEntries));
+
+    res.json({
+      students,
+      totalEntries:   entries.length,
+      totalWithTz,
+      totalWithoutTz,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Database error" });

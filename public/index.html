@@ -538,7 +538,7 @@ async function saveEntry(e) {
       body: JSON.stringify({
         desc: e.desc, projectId: e.projectId, tags: e.tags,
         start: toISOZ(e.start), end: toISOZ(e.end),
-        duration: e.duration,
+        duration: e.duration, tz: CLIENT_TZ,
       }),
     });
     if (!res.ok) throw new Error(await res.text());

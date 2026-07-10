@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Bay Valley Tech — Log Timezones</title>
+<link rel="stylesheet" href="admin-styles.css"/>
+<style>
+  .tz-wrap{padding:24px 28px 40px;}
+  .tz-intro{color:var(--t2);font-size:12.5px;line-height:1.6;max-width:720px;margin-bottom:22px;}
+  .tz-table{width:100%;border-collapse:collapse;background:var(--bg2);border:1px solid var(--border);border-radius:12px;overflow:hidden;}
+  .tz-table th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--t2);font-weight:600;padding:12px 16px;border-bottom:1px solid var(--border);}
+  .tz-table td{padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:top;}
+  .tz-table tr:last-child td{border-bottom:none;}
+  .tz-student{display:flex;align-items:center;gap:10px;}
+  .tz-avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#0A0B0F;flex-shrink:0;object-fit:cover;}
+  .tz-name{font-weight:600;}
+  .tz-email{color:var(--t2);font-size:11.5px;}
+  .tz-primary{font-family:'Geist Mono',monospace;font-size:12.5px;}
+  .tz-also{color:var(--t1);font-size:11.5px;margin-top:3px;}
+  .tz-flag{display:inline-flex;align-items:center;gap:4px;background:rgba(240,92,92,.12);border:1px solid rgba(240,92,92,.3);color:var(--red);border-radius:14px;padding:2px 9px;font-size:10.5px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin-left:8px;}
+  .tz-none{color:var(--t2);font-style:italic;}
+  .back-link{color:var(--t1);font-size:12px;text-decoration:none;display:flex;align-items:center;gap:5px;}
+  .back-link:hover{color:var(--t0);}
+</style>
+</head>
+<body>
+
+<!-- ── Login (same session/cookie as the main admin dashboard) ── -->
+<div id="login-screen">
+  <div class="login-card fadeIn">
+    <div class="badge-admin">&#x2B21; Admin Portal</div>
+    <h1>Instructor access</h1>
+    <p>Enter the admin password to view log timezones.</p>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="pw-input" placeholder="&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;" onkeydown="if(event.key==='Enter')tryLogin()"/>
+    </div>
+    <div class="err" id="pw-err"></div>
+    <button class="login-btn" id="login-btn" onclick="tryLogin()">Sign in</button>
+  </div>
+</div>
+
+<!-- ── App ── -->
+<div id="app" style="display:none;flex-direction:column;min-height:100vh;">
+  <header>
+    <div class="brand">
+      <a class="back-link" href="admin.html">&#x2039; Dashboard</a>
+    </div>
+    <div class="header-right">
+      <span class="admin-chip" id="admin-label">Admin</span>
+      <button class="signout-btn" onclick="signOutAdmin()">Sign out</button>
+    </div>
+  </header>
+
+  <div class="stats-bar">
+    <div class="stat-card"><div class="stat-label">Students with logs</div><div class="stat-val mono" id="stat-students">&#x2014;</div><div class="stat-sub">have at least one entry</div></div>
+    <div class="stat-card"><div class="stat-label">Entries with a timezone</div><div class="stat-val mono" id="stat-with-tz">&#x2014;</div><div class="stat-sub">recorded at save time</div></div>
+    <div class="stat-card"><div class="stat-label">Entries missing one</div><div class="stat-val mono" id="stat-without-tz">&#x2014;</div><div class="stat-sub">logged before this feature, or blocked</div></div>
+    <div class="stat-card"><div class="stat-label">Multiple timezones</div><div class="stat-val mono" id="stat-multi">&#x2014;</div><div class="stat-sub">students flagged below</div></div>
+  </div>
+
+  <div class="tz-wrap">
+    <p class="tz-intro">
+      Each log entry records the IANA timezone (e.g. <span class="mono">America/Los_Angeles</span>) that the
+      student's own browser reported at the moment they saved it — the same value already used to display
+      entries in local time. This only reflects that one-time reading per entry, not live location tracking.
+      Students who show more than one timezone across their entries are flagged.
+    </p>
+    <table class="tz-table">
+      <thead>
+        <tr>
+          <th>Student</th>
+          <th>Primary timezone</th>
+          <th>Also seen from</th>
+          <th>Last logged from</th>
+          <th>Entries</th>
+        </tr>
+      </thead>
+      <tbody id="tz-tbody">
+        <tr><td colspan="5" class="loading">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+window.tryLogin = async () => {
+  const pw = document.getElementById("pw-input").value;
+  const btn = document.getElementById("login-btn");
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/api/auth/admin`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pw }),
+    });
+    if (!res.ok) throw new Error();
+    showApp();
+  } catch {
+    document.getElementById("pw-err").textContent = "Incorrect password";
+  }
+  btn.disabled = false;
+  document.getElementById("pw-input").value = "";
+};
+
+window.signOutAdmin = async () => {
+  await fetch(`${API}/api/auth/admin/logout`, { method: "POST" });
+  document.getElementById("login-screen").style.display = "flex";
+  document.getElementById("app").style.display = "none";
+};
+
+function showApp() {
+  document.getElementById("login-screen").style.display = "none";
+  document.getElementById("app").style.display = "flex";
+  loadTimezones();
+}
+
+(async function checkSession() {
+  try {
+    const res = await fetch(`${API}/api/auth/admin/check`);
+    const { ok } = await res.json();
+    if (ok) showApp();
+  } catch {}
+})();
+
+function initials(name) {
+  return (name || "?").split(" ").filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join("");
+}
+
+async function loadTimezones() {
+  const tbody = document.getElementById("tz-tbody");
+  try {
+    const res = await fetch(`${API}/api/admin/timezones`);
+    if (!res.ok) { signOutAdmin(); return; }
+    const data = await res.json();
+
+    document.getElementById("stat-students").textContent    = data.students.length;
+    document.getElementById("stat-with-tz").textContent     = data.totalWithTz;
+    document.getElementById("stat-without-tz").textContent  = data.totalWithoutTz;
+    document.getElementById("stat-multi").textContent       = data.students.filter(s => s.multiTz).length;
+
+    if (!data.students.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="loading">No log entries yet.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = data.students.map(s => {
+      const also = s.timezones.slice(1);
+      const lastTzRow = s.timezones.find(t => t.tz === s.lastSeenTz);
+      return `
+        <tr>
+          <td>
+            <div class="tz-student">
+              ${s.photo
+                ? `<img class="tz-avatar" src="${s.photo}"/>`
+                : `<div class="tz-avatar" style="background:${s.avatarColor}">${initials(s.displayName)}</div>`}
+              <div>
+                <div class="tz-name">${s.displayName}${s.multiTz ? '<span class="tz-flag">Multiple zones</span>' : ""}</div>
+                <div class="tz-email">${s.email}</div>
+              </div>
+            </div>
+          </td>
+          <td class="tz-primary">${s.primaryTz || '<span class="tz-none">—</span>'}</td>
+          <td>${also.length ? also.map(t => `<div class="tz-also">${t.tz} · ${t.count} ${t.count === 1 ? "entry" : "entries"}</div>`).join("") : '<span class="tz-none">—</span>'}</td>
+          <td class="tz-primary">${lastTzRow ? `${lastTzRow.tz}<div class="tz-also">${new Date(lastTzRow.lastSeen).toLocaleString()}</div>` : '<span class="tz-none">—</span>'}</td>
+          <td class="mono">${s.totalEntries}${s.missingTz ? `<div class="tz-also">${s.missingTz} without a zone</div>` : ""}</td>
+        </tr>`;
+    }).join("");
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5" class="loading">Failed to load.</td></tr>`;
+    console.error(err);
+  }
+}
+</script>
+</body>
+</html>
