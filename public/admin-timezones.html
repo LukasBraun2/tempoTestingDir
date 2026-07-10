@@ -31,9 +31,9 @@
 <!-- ── Login (same session/cookie as the main admin dashboard) ── -->
 <div id="login-screen">
   <div class="login-card fadeIn">
-    <div class="badge-admin">&#x2B21; Admin Portal</div>
-    <h1>Instructor access</h1>
-    <p>Enter the admin password to view log timezones.</p>
+    <div class="badge-admin">&#x2B21; Timezones Access</div>
+    <h1>Restricted access</h1>
+    <p>Enter the timezones-page password to continue.</p>
     <div class="field">
       <label>Password</label>
       <input type="password" id="pw-input" placeholder="&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;" onkeydown="if(event.key==='Enter')tryLogin()"/>
@@ -119,7 +119,7 @@ window.tryLogin = async () => {
   const btn = document.getElementById("login-btn");
   btn.disabled = true;
   try {
-    const res = await fetch(`${API}/api/auth/admin`, {
+    const res = await fetch(`${API}/api/auth/admin-tz`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: pw }),
     });
@@ -133,7 +133,7 @@ window.tryLogin = async () => {
 };
 
 window.signOutAdmin = async () => {
-  await fetch(`${API}/api/auth/admin/logout`, { method: "POST" });
+  await fetch(`${API}/api/auth/admin-tz/logout`, { method: "POST" });
   document.getElementById("login-screen").style.display = "flex";
   document.getElementById("app").style.display = "none";
 };
@@ -146,7 +146,7 @@ function showApp() {
 
 (async function checkSession() {
   try {
-    const res = await fetch(`${API}/api/auth/admin/check`);
+    const res = await fetch(`${API}/api/auth/admin-tz/check`);
     const { ok } = await res.json();
     if (ok) showApp();
   } catch {}

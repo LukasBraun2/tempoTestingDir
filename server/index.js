@@ -48,6 +48,17 @@ if (!config.adminPasswordHash) {
   console.log("✅  Admin password hashed and saved.");
 }
 
+if (!config.adminTzPasswordHash) {
+  const initialTzPassword = process.env.ADMIN_TZ_PASSWORD;
+  if (!initialTzPassword || initialTzPassword.length < 8) {
+    console.error("\n❌  Set ADMIN_TZ_PASSWORD (≥8 chars) as an environment variable before starting.\n");
+    process.exit(1);
+  }
+  config.adminTzPasswordHash = bcrypt.hashSync(initialTzPassword, 12);
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  console.log("✅  Timezones-page password hashed and saved.");
+}
+
 // ── PostgreSQL pool ───────────────────────────────────────────────────────────
 if (!process.env.DATABASE_URL) {
   console.error("\n❌  Missing DATABASE_URL environment variable.\n");
@@ -295,6 +306,51 @@ app.post("/api/auth/admin/logout", (req, res) => {
 
 app.get("/api/auth/admin/check", (req, res) => {
   res.json({ ok: !!req.session.isAdmin });
+});
+
+// ── Timezones-page auth (separate password/session from the main admin login) ─
+const tzLoginAttempts = new Map();
+function isTzRateLimited(ip) {
+  const now = Date.now(), windowMs = 15 * 60 * 1000;
+  const entry = tzLoginAttempts.get(ip) || { count: 0, resetAt: now + windowMs };
+  if (now > entry.resetAt) { tzLoginAttempts.set(ip, { count: 0, resetAt: now + windowMs }); return false; }
+  return entry.count >= 5;
+}
+function recordTzFailedAttempt(ip) {
+  const now = Date.now(), windowMs = 15 * 60 * 1000;
+  const entry = tzLoginAttempts.get(ip) || { count: 0, resetAt: now + windowMs };
+  entry.count++;
+  tzLoginAttempts.set(ip, entry);
+}
+function clearTzAttempts(ip) { tzLoginAttempts.delete(ip); }
+
+function requireTzAdmin(req, res, next) {
+  if (req.session.isTzAdmin) return next();
+  return res.status(401).json({ error: "Unauthorized" });
+}
+
+app.post("/api/auth/admin-tz", async (req, res) => {
+  const ip = req.ip;
+  if (isTzRateLimited(ip))
+    return res.status(429).json({ error: "Too many attempts. Try again in 15 minutes." });
+  const { password } = req.body;
+  const match = password && await bcrypt.compare(password, config.adminTzPasswordHash);
+  if (!match) {
+    recordTzFailedAttempt(ip);
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  clearTzAttempts(ip);
+  req.session.isTzAdmin = true;
+  res.json({ ok: true });
+});
+
+app.post("/api/auth/admin-tz/logout", (req, res) => {
+  req.session.isTzAdmin = false;
+  res.json({ ok: true });
+});
+
+app.get("/api/auth/admin-tz/check", (req, res) => {
+  res.json({ ok: !!req.session.isTzAdmin });
 });
 
 
@@ -718,7 +774,7 @@ app.get("/api/admin/students", requireAdmin, async (req, res) => {
 // unexpected zone (e.g. a supposed-local student whose entries all come in
 // from a different region), not for tracking anyone's real-time location —
 // we only have whatever zone was recorded on each past entry.
-app.get("/api/admin/timezones", requireAdmin, async (req, res) => {
+app.get("/api/admin/timezones", requireTzAdmin, async (req, res) => {
   try {
     const { rows: users }   = await pool.query("SELECT * FROM users");
     const { rows: entries } = await pool.query(
