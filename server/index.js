@@ -346,6 +346,31 @@ const fmtDateShort = (d, tz) => {
   return new Date(y, mo - 1, day).toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
+// ORDER BY start DESC in SQL sorts the *raw stored string*. For naive rows
+// that string IS the displayed clock time, so raw-string order matches what
+// gets printed. But a timezone-aware row is stored as a UTC instant and
+// displayed converted into a target zone (Pacific, or the viewer's zone) —
+// so its raw string's hour/date digits can differ from what's printed,
+// letting it land in the "wrong" spot relative to naive rows next to it.
+// This builds a sort key from the *same wall-clock digits that get printed*
+// for a given `tz`, so list order always matches the printed order.
+function displaySortKey(v, tz) {
+  if (hasTZInfo(v)) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz || PACIFIC_TZ, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).formatToParts(new Date(v));
+    const get = t => parts.find(p => p.type === t).value;
+    return Date.UTC(+get("year"), +get("month") - 1, +get("day"), +get("hour"), +get("minute"), +get("second"));
+  }
+  const m = String(v).match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return 0;
+  const [, y, mo, day, h, mi, s] = m.map(Number);
+  return Date.UTC(y, mo - 1, day, h, mi, s);
+}
+const byDisplayTimeDesc = (tz) => (a, b) => displaySortKey(b.start, tz) - displaySortKey(a.start, tz);
+
 // ── Entries: list ─────────────────────────────────────────────────────────────
 app.get("/api/entries/list", requireAuth, async (req, res) => {
   try {
@@ -359,7 +384,7 @@ app.get("/api/entries/list", requireAuth, async (req, res) => {
       'SELECT * FROM entries WHERE uid = $1 ORDER BY start DESC',
       [req.user.id]
     );
-    const entries = rows.map(parseEntry);
+    const entries = rows.map(parseEntry).sort(byDisplayTimeDesc(clientTz));
     const dayMap  = {};
 
     entries.forEach(e => {
@@ -698,6 +723,7 @@ app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
     if (ps)      filtered = filtered.filter(e => new Date(e.start) >= ps);
     if (pe)      filtered = filtered.filter(e => new Date(e.start) <= pe);
     if (project) filtered = filtered.filter(e => e.projectId === project);
+    filtered.sort(byDisplayTimeDesc());
 
     const entries = filtered.slice(0, 50).map(e => ({
       id:                e.id,
@@ -749,16 +775,16 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
       ? totalEntries
       : Math.max(1, parseInt(limit, 10) || 100);
 
-    const dataParams = [...params, limitNum, offsetNum];
+    const dataParams = [...params];
     const { rows } = await pool.query(
       `SELECT e.*, u.name AS user_name, u.email AS user_email, u.photo AS user_photo
        FROM entries e LEFT JOIN users u ON u.id = e.uid
-       ${whereSql}
-       ORDER BY e.start DESC
-       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+       ${whereSql}`,
       dataParams
     );
-    const entries = rows.map(parseEntry);
+    const entries = rows.map(parseEntry)
+      .sort(byDisplayTimeDesc())
+      .slice(offsetNum, offsetNum + limitNum);
 
     const feed = entries.map(e => ({
       id:                e.id,
@@ -835,6 +861,7 @@ app.get("/api/admin/export", requireAdmin, async (req, res) => {
     if (ps)      entries = entries.filter(e => new Date(e.start) >= ps);
     if (pe)      entries = entries.filter(e => new Date(e.start) <= pe);
     if (project) entries = entries.filter(e => e.projectId === project);
+    entries.sort(byDisplayTimeDesc());
 
     const toDate = iso => {
       if (hasTZInfo(iso)) {
