@@ -722,8 +722,11 @@ app.get("/api/admin/timezones", requireAdmin, async (req, res) => {
   try {
     const { rows: users }   = await pool.query("SELECT * FROM users");
     const { rows: entries } = await pool.query(
-      "SELECT uid, tz, start FROM entries ORDER BY start DESC"
+      'SELECT id, uid, tz, start, "desc" FROM entries ORDER BY start DESC'
     );
+
+    const userById = {};
+    for (const u of users) userById[u.id] = u;
 
     const byUid = {};
     for (const e of entries) {
@@ -769,8 +772,24 @@ app.get("/api/admin/timezones", requireAdmin, async (req, res) => {
       .filter(Boolean)
       .sort((a, b) => (b.multiTz - a.multiTz) || (b.totalEntries - a.totalEntries));
 
+    // Flat, entry-by-entry list (most recent first) — every log, one row each,
+    // with the student attached so it can be searched/filtered on the client.
+    const entryLog = entries.map(e => {
+      const u = userById[e.uid] || {};
+      return {
+        id:          e.id,
+        uid:         e.uid,
+        displayName: u.name  || "Unknown",
+        email:       u.email || "",
+        desc:        e.desc,
+        start:       e.start,
+        tz:          e.tz || null,
+      };
+    });
+
     res.json({
       students,
+      entryLog,
       totalEntries:   entries.length,
       totalWithTz,
       totalWithoutTz,
