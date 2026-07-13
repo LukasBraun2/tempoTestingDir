@@ -99,6 +99,7 @@ header h1{font-size:14px;font-weight:600;letter-spacing:-.01em;}
 .c-academy{color:#818CF8;} .bg-academy{background:rgba(129,140,248,.15);border-color:rgba(129,140,248,.4);}
 .c-volunteer{color:#22C97A;} .bg-volunteer{background:rgba(34,201,122,.15);border-color:rgba(34,201,122,.4);}
 .c-module5{color:#F5A623;} .bg-module5{background:rgba(245,166,35,.15);border-color:rgba(245,166,35,.4);}
+.c-bayvalley{color:#EC4899;} .bg-bayvalley{background:rgba(236,72,153,.15);border-color:rgba(236,72,153,.4);}
 
 /* ── Responsive ── */
 @media(max-width:900px){
