@@ -644,9 +644,9 @@ app.delete("/api/entries/:id", requireAuth, async (req, res) => {
 // ── Admin: aggregated stats ───────────────────────────────────────────────────
 app.get("/api/admin/stats", requireAdmin, async (req, res) => {
   try {
-    const { period = "week", date = "", dateEnd = "" } = req.query;
+    const { period = "week", date = "" } = req.query;
     const ps = periodStart(period, date);
-    const pe = periodEnd(period, date, dateEnd);
+    const pe = periodEnd(period, date);
 
     let r1, r2, r4;
 
@@ -694,9 +694,9 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
 // ── Admin: students view ──────────────────────────────────────────────────────
 app.get("/api/admin/students", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", search = "", date = "", dateEnd = "" } = req.query;
+    const { project = "", period = "week", search = "", date = "" } = req.query;
     const ps = periodStart(period, date);
-    const pe = periodEnd(period, date, dateEnd);
+    const pe = periodEnd(period, date);
     const ws = weekStart();
 
     const { rows: allUsers } = await pool.query(
@@ -859,9 +859,9 @@ app.get("/api/admin/timezones", requireTzAdmin, async (req, res) => {
 // ── Admin: entries for one student ───────────────────────────────────────────
 app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", date = "", dateEnd = "" } = req.query;
+    const { project = "", period = "week", date = "" } = req.query;
     const ps = periodStart(period, date);
-    const pe = periodEnd(period, date, dateEnd);
+    const pe = periodEnd(period, date);
 
     const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id = $1", [req.params.uid]);
     if (!userRows[0]) return res.status(404).json({ error: "User not found" });
@@ -901,9 +901,9 @@ app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
 // ── Admin: flat feed of individual entries, most-recent first ────────────────
 app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", search = "", date = "", dateEnd = "", limit = "100", offset = "0" } = req.query;
+    const { project = "", period = "week", search = "", date = "", limit = "100", offset = "0" } = req.query;
     const ps = periodStart(period, date);
-    const pe = periodEnd(period, date, dateEnd);
+    const pe = periodEnd(period, date);
 
     // Build WHERE clause + params once, reuse for both the count and the page query.
     const where  = [];
@@ -988,9 +988,9 @@ app.get("/api/admin/entries", requireAdmin, async (req, res) => {
 // ── Admin: export CSV ─────────────────────────────────────────────────────────
 app.get("/api/admin/export", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", search = "", date = "", dateEnd = "" } = req.query;
+    const { project = "", period = "week", search = "", date = "" } = req.query;
     const ps = periodStart(period, date);
-    const pe = periodEnd(period, date, dateEnd);
+    const pe = periodEnd(period, date);
 
     let { rows: users } = await pool.query(
       "SELECT DISTINCT u.* FROM users u JOIN entries e ON e.uid = u.id"
@@ -1191,11 +1191,9 @@ function periodStart(period, date) {
   return null; // "all"
 }
 
-function periodEnd(period, date, dateEnd) {
+function periodEnd(period, date) {
   if (period === "day" && date) {
-    // dateEnd lets a "day" period act as an inclusive date range;
-    // falls back to `date` itself for a single-day selection.
-    const d = new Date((dateEnd || date) + "T23:59:59.999");
+    const d = new Date(date + "T23:59:59.999");
     return isNaN(d.getTime()) ? null : d;
   }
   return null; // no upper bound for other periods

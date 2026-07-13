@@ -195,11 +195,6 @@ header h1{font-size:14px;font-weight:600;letter-spacing:-.01em;}
 .cal-day.empty{cursor:default;}
 .cal-day.other-month{color:var(--t2);opacity:.4;}
 .cal-day.disabled{cursor:not-allowed;opacity:.25;}
-.cal-day.in-range{background:rgba(245,166,35,.18);color:var(--t0);border-radius:0;}
-.cal-day.in-range:hover{background:rgba(245,166,35,.28);}
-.cal-day.range-start{border-radius:6px 0 0 6px;}
-.cal-day.range-end{border-radius:0 6px 6px 0;}
-.cal-day.range-start.range-end{border-radius:6px;}
 .cal-year-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:6px;}
 .cal-year-row select{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:5px 8px;font-size:12px;color:var(--t0);font-family:inherit;outline:none;cursor:pointer;}
 .cal-year-row select:focus{border-color:rgba(245,166,35,.4);}
