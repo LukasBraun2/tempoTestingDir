@@ -23,7 +23,6 @@ const PROJECTS = {
   academy:   { name: "Academy",   color: "#818CF8", cls: "academy"  },
   volunteer: { name: "Volunteer", color: "#22C97A", cls: "volunteer" },
   module5:   { name: "Module 5",  color: "#F5A623", cls: "module5"  },
-  bayvalley: { name: "Bay Valley Foundation", color: "#EC4899", cls: "bayvalley" },
 };
 
 const TAGS = [
