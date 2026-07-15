@@ -652,7 +652,11 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
     let weekSecs, totalEntries, weekStudents;
 
     if (datesSet) {
-      const { rows } = await pool.query("SELECT start, duration, uid FROM entries");
+      const { lo, hi } = boundsFromDates(datesSet);
+      const { rows } = await pool.query(
+        "SELECT start, duration, uid FROM entries WHERE start >= $1 AND start <= $2",
+        [lo.toISOString(), hi.toISOString()]
+      );
       const matched = rows.filter(r => matchesDates(r.start, datesSet));
       weekSecs     = matched.reduce((s, r) => s + r.duration, 0);
       totalEntries = matched.length;
@@ -918,13 +922,17 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
     const pe = periodEnd(period, date);
 
     // Build WHERE clause + params once, reuse for both the count and the page query.
-    // A multi-day `dates` selection can't be expressed as a simple SQL range
-    // (and the underlying column mixes naive/timezone-aware strings), so
-    // when it's present we skip the SQL-level date range and filter by day
-    // in JS below instead.
+    // A multi-day `dates` selection can't be expressed as an exact SQL range
+    // (and the underlying column mixes naive/timezone-aware strings), so we
+    // use a generous SQL-level bound around the selected days to keep the
+    // query cheap, then do the exact per-day match in JS below.
     const where  = [];
     const params = [];
-    if (!datesSet) {
+    if (datesSet) {
+      const { lo, hi } = boundsFromDates(datesSet);
+      if (lo) { params.push(lo.toISOString()); where.push(`e.start >= $${params.length}`); }
+      if (hi) { params.push(hi.toISOString()); where.push(`e.start <= $${params.length}`); }
+    } else {
       if (ps) { params.push(ps.toISOString()); where.push(`e.start >= $${params.length}`); }
       if (pe) { params.push(pe.toISOString());  where.push(`e.start <= $${params.length}`); }
     }
@@ -1245,6 +1253,25 @@ function inSelection(start, ps, pe, datesSet) {
   if (ps && t < ps) return false;
   if (pe && t > pe) return false;
   return true;
+}
+// A generous [lo, hi] bound (±1 day of padding) around the earliest/latest
+// selected date. This lets SQL do a cheap range narrowing before the exact
+// per-day match happens in JS — without it, any `dates` selection would
+// force a full-table scan on every request (this is what caused entries
+// feed / stats to pull the whole entries table into memory on every
+// calendar click, which could crash the process on a memory-constrained
+// host). The padding absorbs any shift between a row's raw stored value and
+// its displayed (possibly Pacific-converted) calendar date, so it's safe to
+// widen without risking a missed row — matchesDates() still does the exact
+// filtering afterward.
+function boundsFromDates(datesSet) {
+  if (!datesSet || !datesSet.size) return { lo: null, hi: null };
+  const sorted = [...datesSet].sort();
+  const lo = new Date(sorted[0] + "T00:00:00Z");
+  lo.setUTCDate(lo.getUTCDate() - 1);
+  const hi = new Date(sorted[sorted.length - 1] + "T00:00:00Z");
+  hi.setUTCDate(hi.getUTCDate() + 2);
+  return { lo, hi };
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
