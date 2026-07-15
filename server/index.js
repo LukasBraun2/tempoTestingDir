@@ -644,38 +644,50 @@ app.delete("/api/entries/:id", requireAuth, async (req, res) => {
 // ── Admin: aggregated stats ───────────────────────────────────────────────────
 app.get("/api/admin/stats", requireAdmin, async (req, res) => {
   try {
-    const { period = "week", date = "" } = req.query;
+    const { period = "week", date = "", dates = "" } = req.query;
+    const datesSet = parseDatesParam(dates);
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
 
-    let r1, r2, r4;
+    let weekSecs, totalEntries, weekStudents;
 
-    const buildRange = (col) => {
-      if (ps && pe) return { where: `AND ${col} >= $1 AND ${col} <= $2`, params: [ps.toISOString(), pe.toISOString()] };
-      if (ps)       return { where: `AND ${col} >= $1`, params: [ps.toISOString()] };
-      return         { where: "", params: [] };
-    };
+    if (datesSet) {
+      const { rows } = await pool.query("SELECT start, duration, uid FROM entries");
+      const matched = rows.filter(r => matchesDates(r.start, datesSet));
+      weekSecs     = matched.reduce((s, r) => s + r.duration, 0);
+      totalEntries = matched.length;
+      weekStudents = new Set(matched.map(r => r.uid)).size;
+    } else {
+      let r1, r2, r4;
 
-    const range = buildRange("start");
+      const buildRange = (col) => {
+        if (ps && pe) return { where: `AND ${col} >= $1 AND ${col} <= $2`, params: [ps.toISOString(), pe.toISOString()] };
+        if (ps)       return { where: `AND ${col} >= $1`, params: [ps.toISOString()] };
+        return         { where: "", params: [] };
+      };
 
-    ({ rows: r1 } = await pool.query(
-      `SELECT COALESCE(SUM(duration),0)::int AS weeksecs FROM entries WHERE true ${range.where}`,
-      range.params
-    ));
-    ({ rows: r2 } = await pool.query(
-      `SELECT COUNT(*)::int AS totalentries FROM entries WHERE true ${range.where}`,
-      range.params
-    ));
-    ({ rows: r4 } = await pool.query(
-      `SELECT COUNT(DISTINCT uid)::int AS weekstudents FROM entries WHERE true ${range.where}`,
-      range.params
-    ));
+      const range = buildRange("start");
 
-    const weekSecs      = r1[0].weeksecs;
-    const totalEntries  = r2[0].totalentries;
-    const weekStudents  = r4[0].weekstudents;
+      ({ rows: r1 } = await pool.query(
+        `SELECT COALESCE(SUM(duration),0)::int AS weeksecs FROM entries WHERE true ${range.where}`,
+        range.params
+      ));
+      ({ rows: r2 } = await pool.query(
+        `SELECT COUNT(*)::int AS totalentries FROM entries WHERE true ${range.where}`,
+        range.params
+      ));
+      ({ rows: r4 } = await pool.query(
+        `SELECT COUNT(DISTINCT uid)::int AS weekstudents FROM entries WHERE true ${range.where}`,
+        range.params
+      ));
+
+      weekSecs     = r1[0].weeksecs;
+      totalEntries = r2[0].totalentries;
+      weekStudents = r4[0].weekstudents;
+    }
+
     const totalStudents = weekStudents; // now scoped to the selected period, not all-time
-    const avgSecs       = weekStudents > 0 ? Math.round(weekSecs / weekStudents) : 0;
+    const avgSecs        = weekStudents > 0 ? Math.round(weekSecs / weekStudents) : 0;
 
     res.json({
       totalStudents,
@@ -694,7 +706,8 @@ app.get("/api/admin/stats", requireAdmin, async (req, res) => {
 // ── Admin: students view ──────────────────────────────────────────────────────
 app.get("/api/admin/students", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", search = "", date = "" } = req.query;
+    const { project = "", period = "week", search = "", date = "", dates = "" } = req.query;
+    const datesSet = parseDatesParam(dates);
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
     const ws = weekStart();
@@ -723,8 +736,7 @@ app.get("/api/admin/students", requireAdmin, async (req, res) => {
       const allRows = entriesByUid[u.id] || [];
 
       let filtered = allRows;
-      if (ps) filtered = filtered.filter(e => new Date(e.start) >= ps);
-      if (pe) filtered = filtered.filter(e => new Date(e.start) <= pe);
+      filtered = filtered.filter(e => inSelection(e.start, ps, pe, datesSet));
       if (project) filtered = filtered.filter(e => e.projectId === project);
 
       const weekRows = allRows.filter(e => new Date(e.start) >= ws);
@@ -732,8 +744,7 @@ app.get("/api/admin/students", requireAdmin, async (req, res) => {
       const projTotals = {};
       allRows
         .filter(e => e.projectId && (!project || e.projectId === project))
-        .filter(e => !ps || new Date(e.start) >= ps)
-        .filter(e => !pe || new Date(e.start) <= pe)
+        .filter(e => inSelection(e.start, ps, pe, datesSet))
         .forEach(e => { projTotals[e.projectId] = (projTotals[e.projectId] || 0) + e.duration; });
 
       const projBreakdown = Object.entries(projTotals)
@@ -859,7 +870,8 @@ app.get("/api/admin/timezones", requireTzAdmin, async (req, res) => {
 // ── Admin: entries for one student ───────────────────────────────────────────
 app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", date = "" } = req.query;
+    const { project = "", period = "week", date = "", dates = "" } = req.query;
+    const datesSet = parseDatesParam(dates);
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
 
@@ -872,8 +884,7 @@ app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
     );
     let filtered = rows.map(parseEntry);
 
-    if (ps)      filtered = filtered.filter(e => new Date(e.start) >= ps);
-    if (pe)      filtered = filtered.filter(e => new Date(e.start) <= pe);
+    filtered = filtered.filter(e => inSelection(e.start, ps, pe, datesSet));
     if (project) filtered = filtered.filter(e => e.projectId === project);
     filtered.sort(byDisplayTimeDesc());
 
@@ -901,25 +912,37 @@ app.get("/api/admin/students/:uid/entries", requireAdmin, async (req, res) => {
 // ── Admin: flat feed of individual entries, most-recent first ────────────────
 app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", search = "", date = "", limit = "100", offset = "0" } = req.query;
+    const { project = "", period = "week", search = "", date = "", dates = "", limit = "100", offset = "0" } = req.query;
+    const datesSet = parseDatesParam(dates);
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
 
     // Build WHERE clause + params once, reuse for both the count and the page query.
+    // A multi-day `dates` selection can't be expressed as a simple SQL range
+    // (and the underlying column mixes naive/timezone-aware strings), so
+    // when it's present we skip the SQL-level date range and filter by day
+    // in JS below instead.
     const where  = [];
     const params = [];
-    if (ps)       { params.push(ps.toISOString()); where.push(`e.start >= $${params.length}`); }
-    if (pe)       { params.push(pe.toISOString());  where.push(`e.start <= $${params.length}`); }
+    if (!datesSet) {
+      if (ps) { params.push(ps.toISOString()); where.push(`e.start >= $${params.length}`); }
+      if (pe) { params.push(pe.toISOString());  where.push(`e.start <= $${params.length}`); }
+    }
     if (project)  { params.push(project);           where.push(`e.project_id = $${params.length}`); }
     if (search)   { params.push(`%${search.toLowerCase()}%`); where.push(`(LOWER(u.name) LIKE $${params.length} OR LOWER(u.email) LIKE $${params.length})`); }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const { rows: countRows } = await pool.query(
-      `SELECT COUNT(*)::int AS total FROM entries e LEFT JOIN users u ON u.id = e.uid ${whereSql}`,
+    const { rows: allRows } = await pool.query(
+      `SELECT e.*, u.name AS user_name, u.email AS user_email, u.photo AS user_photo
+       FROM entries e LEFT JOIN users u ON u.id = e.uid
+       ${whereSql}`,
       params
     );
-    const totalEntries = countRows[0].total;
+    let allEntries = allRows.map(parseEntry);
+    if (datesSet) allEntries = allEntries.filter(e => matchesDates(e.start, datesSet));
+    allEntries.sort(byDisplayTimeDesc());
 
+    const totalEntries = allEntries.length;
     const offsetNum = Math.max(0, parseInt(offset, 10) || 0);
     // limit=0 (or "all") means "no cap" — return every matching entry
     const rawLimit   = String(limit).toLowerCase();
@@ -927,16 +950,7 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
       ? totalEntries
       : Math.max(1, parseInt(limit, 10) || 100);
 
-    const dataParams = [...params];
-    const { rows } = await pool.query(
-      `SELECT e.*, u.name AS user_name, u.email AS user_email, u.photo AS user_photo
-       FROM entries e LEFT JOIN users u ON u.id = e.uid
-       ${whereSql}`,
-      dataParams
-    );
-    const entries = rows.map(parseEntry)
-      .sort(byDisplayTimeDesc())
-      .slice(offsetNum, offsetNum + limitNum);
+    const entries = allEntries.slice(offsetNum, offsetNum + limitNum);
 
     const feed = entries.map(e => ({
       id:                e.id,
@@ -988,7 +1002,8 @@ app.get("/api/admin/entries", requireAdmin, async (req, res) => {
 // ── Admin: export CSV ─────────────────────────────────────────────────────────
 app.get("/api/admin/export", requireAdmin, async (req, res) => {
   try {
-    const { project = "", period = "week", search = "", date = "" } = req.query;
+    const { project = "", period = "week", search = "", date = "", dates = "" } = req.query;
+    const datesSet = parseDatesParam(dates);
     const ps = periodStart(period, date);
     const pe = periodEnd(period, date);
 
@@ -1010,8 +1025,7 @@ app.get("/api/admin/export", requireAdmin, async (req, res) => {
       .map(row => ({ ...parseEntry(row), userName: row.user_name, userEmail: row.user_email }))
       .filter(e => uids.has(e.uid));
 
-    if (ps)      entries = entries.filter(e => new Date(e.start) >= ps);
-    if (pe)      entries = entries.filter(e => new Date(e.start) <= pe);
+    entries = entries.filter(e => inSelection(e.start, ps, pe, datesSet));
     if (project) entries = entries.filter(e => e.projectId === project);
     entries.sort(byDisplayTimeDesc());
 
@@ -1197,6 +1211,40 @@ function periodEnd(period, date) {
     return isNaN(d.getTime()) ? null : d;
   }
   return null; // no upper bound for other periods
+}
+
+// ── Multi-day filtering (calendar lets the admin highlight several,
+// possibly non-contiguous, days at once) ───────────────────────────────────
+// `dates` is a comma-separated list of "YYYY-MM-DD" strings. When present it
+// takes priority over the single date/period range above.
+function parseDatesParam(v) {
+  if (typeof v !== "string" || !v.trim()) return null;
+  const days = v.split(",").map(s => s.trim()).filter(Boolean);
+  return days.length ? new Set(days) : null;
+}
+// The calendar's day labels are in Pacific time (matching every other
+// admin-facing display), so a timezone-aware entry is bucketed by its
+// Pacific calendar date; a naive (legacy) entry keeps using its literal
+// stored date, exactly like it does everywhere else in the admin views.
+function entryDateStr(v, tz) {
+  if (hasTZInfo(v)) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz || PACIFIC_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    }).formatToParts(new Date(v));
+    const get = t => parts.find(p => p.type === t).value;
+    return `${get("year")}-${get("month")}-${get("day")}`;
+  }
+  return String(v).split("T")[0];
+}
+const matchesDates = (start, datesSet) => datesSet.has(entryDateStr(start));
+// Shared predicate: a `dates` set (if given) takes priority; otherwise fall
+// back to the existing single day/period start-end range.
+function inSelection(start, ps, pe, datesSet) {
+  if (datesSet) return matchesDates(start, datesSet);
+  const t = new Date(start);
+  if (ps && t < ps) return false;
+  if (pe && t > pe) return false;
+  return true;
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
