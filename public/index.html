@@ -67,6 +67,10 @@
           </button>
           <div class="topbar-title" id="topbar-title">Time Tracker</div>
         </div>
+        <div class="topbar-stats">
+          <div class="tstat"><div class="tstat-label">Today</div><div class="tstat-val mono" id="stat-today">00:00:00</div></div>
+          <div class="tstat"><div class="tstat-label">This week</div><div class="tstat-val mono" id="stat-week">00:00:00</div></div>
+        </div>
       </div>
 
       <!-- Tracker view -->
@@ -237,6 +241,7 @@ window.selectedProj   = null;
 window.selectedTags   = [];
 window.currentUser    = null;
 window.entryDays      = [];
+window.statsBase      = { todaySeconds: 0, weekSeconds: 0 };
 
 // ── Helpers (live timer display + edit modal only) ────────────────────────────
 const fmt      = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60; return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(ss).padStart(2,"0")}`; };
@@ -338,14 +343,26 @@ function onUserSignedIn(user) {
 async function loadEntries() {
   $("db-loading").style.display = "block";
   try {
-    const listRes = await fetch(`${API}/api/entries/list?tz=${encodeURIComponent(CLIENT_TZ)}`);
+    const [listRes, statsRes] = await Promise.all([
+      fetch(`${API}/api/entries/list?tz=${encodeURIComponent(CLIENT_TZ)}`),
+      fetch(`${API}/api/entries/stats`),
+    ]);
     window.entryDays = await listRes.json();
+    window.statsBase = await statsRes.json();
     $("db-loading").style.display = "none";
     renderEntries();
+    updateTopStats();
   } catch(e) {
     console.error("Failed to load entries:", e);
     $("db-loading").style.display = "none";
   }
+}
+
+// ── Top stats — server base + live timer offset ───────────────────────────────
+function updateTopStats() {
+  const live = window.timerStart ? Math.floor((Date.now() - window.timerStart) / 1000) : 0;
+  $("stat-today").textContent = fmt((window.statsBase.todaySeconds || 0) + live);
+  $("stat-week").textContent  = fmt((window.statsBase.weekSeconds  || 0) + live);
 }
 
 // ── Reports — entirely server-computed ───────────────────────────────────────
@@ -456,6 +473,7 @@ window.startTimer = () => {
   $("main-btn").innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="white"><rect x="3" y="3" width="18" height="18" rx="2.5"/></svg>';
   window.timerInterval = setInterval(() => {
     $("elapsed-display").textContent = fmt(Math.floor((Date.now() - window.timerStart) / 1000));
+    updateTopStats();
   }, 1000);
 };
 
