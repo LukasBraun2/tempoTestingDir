@@ -517,6 +517,23 @@ function showTimerErr(msg) { const el = $("timer-err"); el.textContent = msg; el
 // ── Mode toggle ───────────────────────────────────────────────────────────────
 window.toggleMode = () => {
   const isManual = window.timerMode === "manual";
+
+  // Switching timer -> manual while the timer is running would otherwise
+  // silently kill the interval without resetting the running-state UI,
+  // leaving the elapsed-time display frozen on its last value. Confirm
+  // first (mirrors editEntry()'s handling of the same situation), and if
+  // the user proceeds, fully tear down the running-timer UI.
+  if (!isManual && window.timerStart) {
+    if (!confirm("Switch to manual entry and discard the running timer?")) return;
+    clearInterval(window.timerInterval);
+    window.timerStart = null;
+    $("timer-card").classList.remove("recording");
+    $("elapsed-display").style.display = "none";
+    $("elapsed-display").textContent = "";
+    $("main-btn").className = "start-btn go";
+    $("main-btn").innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="#0A0B0F"><polygon points="5,3 19,12 5,21"/></svg>';
+  }
+
   window.timerMode = isManual ? "timer" : "manual";
   $("timer-controls-timer").style.display  = isManual ? "block" : "none";
   $("timer-controls-manual").style.display = isManual ? "none" : "flex";
@@ -525,7 +542,6 @@ window.toggleMode = () => {
   $("mode-icon-clock").style.display    = isManual ? "none"  : "block";
   $("rec-badge").style.display    = "none";
   $("manual-badge").style.display = isManual ? "none" : "flex";
-  if (!isManual && window.timerStart) { clearInterval(window.timerInterval); window.timerStart = null; }
   if (!isManual) $("manual-date").value = toLocalDate(new Date());
 };
 
