@@ -164,7 +164,11 @@
       <select id="edit-proj"><option value="">No project</option></select>
     </div>
     <div class="field"><label>Date</label>
-      <input type="date" id="edit-date" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:9px 12px;font-size:13.5px;color:var(--t0);font-family:'Geist Mono',monospace;outline:none;transition:border-color .15s;" oninput="updateEditDur()"/>
+      <div class="time-row">
+        <div class="time-col"><div class="time-col-lbl">Start date</div><input type="date" id="edit-start-date" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:9px 12px;font-size:13.5px;color:var(--t0);font-family:'Geist Mono',monospace;outline:none;transition:border-color .15s;" oninput="updateEditDur()"/></div>
+        <div class="time-arrow">&#8594;</div>
+        <div class="time-col"><div class="time-col-lbl">End date</div><input type="date" id="edit-end-date" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:9px 12px;font-size:13.5px;color:var(--t0);font-family:'Geist Mono',monospace;outline:none;transition:border-color .15s;" oninput="updateEditDur()"/></div>
+      </div>
     </div>
     <div class="field"><label>Time</label>
       <div class="time-row">
@@ -560,7 +564,8 @@ window.openEdit = entry => {
   $("edit-id").value    = entry.id;
   $("edit-desc").value  = entry.desc || "";
   $("edit-proj").value  = entry.projectId || "";
-  $("edit-date").value  = toLocalDate(entry.start);
+  $("edit-start-date").value = toLocalDate(entry.start);
+  $("edit-end-date").value   = toLocalDate(entry.end);
   $("edit-start").value = toTimeStr(entry.start);
   $("edit-end").value   = toTimeStr(entry.end);
   $("edit-time-err").style.display = "none";
@@ -577,19 +582,21 @@ window.openEdit = entry => {
 };
 window.closeModal = () => $("edit-modal").classList.remove("open");
 window.updateEditDur = () => {
-  const dateVal = $("edit-date").value, startVal = $("edit-start").value, endVal = $("edit-end").value;
-  if (!dateVal || !startVal || !endVal) { $("edit-dur-display").textContent = "--:--:--"; return; }
-  const dur = Math.floor((new Date(dateVal+"T"+endVal) - new Date(dateVal+"T"+startVal)) / 1000);
+  const startDateVal = $("edit-start-date").value, endDateVal = $("edit-end-date").value;
+  const startVal = $("edit-start").value, endVal = $("edit-end").value;
+  if (!startDateVal || !endDateVal || !startVal || !endVal) { $("edit-dur-display").textContent = "--:--:--"; return; }
+  const dur = Math.floor((new Date(endDateVal+"T"+endVal) - new Date(startDateVal+"T"+startVal)) / 1000);
   const el = $("edit-dur-display");
   el.textContent = dur >= 0 ? fmt(dur) : "--:--:--";
   el.style.color = dur >= 0 ? "var(--accent)" : "var(--red)";
 };
 window.saveEdit = async () => {
-  const id = $("edit-id").value, dateVal = $("edit-date").value;
+  const id = $("edit-id").value;
+  const startDateVal = $("edit-start-date").value, endDateVal = $("edit-end-date").value;
   const startVal = $("edit-start").value, endVal = $("edit-end").value;
-  if (!dateVal) { $("edit-time-err").textContent = "Please select a date."; $("edit-time-err").style.display = "block"; return; }
+  if (!startDateVal || !endDateVal) { $("edit-time-err").textContent = "Please select a start and end date."; $("edit-time-err").style.display = "block"; return; }
   if (!startVal || !endVal) { $("edit-time-err").textContent = "Please set start and end time."; $("edit-time-err").style.display = "block"; return; }
-  const newStart = new Date(dateVal+"T"+startVal), newEnd = new Date(dateVal+"T"+endVal);
+  const newStart = new Date(startDateVal+"T"+startVal), newEnd = new Date(endDateVal+"T"+endVal);
   const dur = Math.floor((newEnd - newStart) / 1000);
   if (dur < 0) { $("edit-time-err").textContent = "End must be after start."; $("edit-time-err").style.display = "block"; return; }
   const tags = [...document.querySelectorAll(".edit-tag-toggle.on")].map(b => b.dataset.tag);
