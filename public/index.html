@@ -102,9 +102,10 @@
               </div>
               <div id="timer-controls-manual" style="display:none;">
                 <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;">
-                  <input type="date" class="time-input mono" id="manual-date" style="width:130px;"/>
+                  <input type="date" class="time-input mono" id="manual-start-date" style="width:130px;"/>
                   <input type="time" class="time-input mono" id="manual-start"/>
                   <span style="color:var(--t2);font-size:13px;">—</span>
+                  <input type="date" class="time-input mono" id="manual-end-date" style="width:130px;"/>
                   <input type="time" class="time-input mono" id="manual-end"/>
                   <button class="add-btn" onclick="logManual()">+ Add</button>
                 </div>
@@ -480,19 +481,21 @@ window.stopTimer = async () => {
 
 // ── Manual log ────────────────────────────────────────────────────────────────
 window.logManual = async () => {
-  const ms = $("manual-start").value, me = $("manual-end").value, md = $("manual-date").value;
+  const ms = $("manual-start").value, me = $("manual-end").value;
+  const msd = $("manual-start-date").value, med = $("manual-end-date").value;
   if (!ms || !me) { showTimerErr("Please set both start and end time."); return; }
-  if (!md)        { showTimerErr("Please select a date."); return; }
+  if (!msd || !med) { showTimerErr("Please select a start and end date."); return; }
   // Interpreting "date + time" with `new Date(...)` (no zone suffix) reads it
   // as this browser's local wall-clock moment, so the instant is correct;
   // saveEntry() then converts it to a real timezone-aware ISO string.
-  const startDate = new Date(md + "T" + ms), endDate = new Date(md + "T" + me);
+  const startDate = new Date(msd + "T" + ms), endDate = new Date(med + "T" + me);
   const dur = Math.floor((endDate - startDate) / 1000);
-  if (dur < 0) { showTimerErr("End time must be after start time."); return; }
+  if (dur < 0) { showTimerErr("End must be after start."); return; }
   await saveEntry({ desc: $("timer-desc").value || "Untitled", projectId: window.selectedProj, tags: [...window.selectedTags], start: startDate, end: endDate, duration: dur });
   resetInputs();
   $("manual-start").value = ""; $("manual-end").value = "";
-  $("manual-date").value = toLocalDate(new Date());
+  $("manual-start-date").value = toLocalDate(new Date());
+  $("manual-end-date").value = toLocalDate(new Date());
 };
 function showTimerErr(msg) { const el = $("timer-err"); el.textContent = msg; el.style.display = "block"; setTimeout(() => el.style.display = "none", 4000); }
 
@@ -524,7 +527,7 @@ window.toggleMode = () => {
   $("mode-icon-clock").style.display    = isManual ? "none"  : "block";
   $("rec-badge").style.display    = "none";
   $("manual-badge").style.display = isManual ? "none" : "flex";
-  if (!isManual) $("manual-date").value = toLocalDate(new Date());
+  if (!isManual) { $("manual-start-date").value = toLocalDate(new Date()); $("manual-end-date").value = toLocalDate(new Date()); }
 };
 
 // ── API save / delete ─────────────────────────────────────────────────────────
