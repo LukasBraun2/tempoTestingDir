@@ -121,6 +121,7 @@
           <button class="cal-nav" onclick="calShiftMonth(1)">&#x203A;</button>
         </div>
         <div class="cal-grid" id="cal-grid"></div>
+        <div class="cal-hint" id="cal-hint">Click a start date, then an end date. Ctrl/⌘-click toggles single days.</div>
       </div>
     </div>
   </div>
@@ -214,12 +215,72 @@ function renderCal() {
     const cls = ['cal-day',
       isSelected ? 'selected' : '',
       isToday && !isSelected ? 'today' : '',
-      isDisabled ? 'disabled' : ''
+      isDisabled ? 'disabled' : '',
+      dtStr === calRangeAnchor ? 'anchor' : ''
     ].filter(Boolean).join(' ');
-    const click = isDisabled ? '' : `onclick="calPickDay('${dtStr}')"`;
-    grid.innerHTML += `<div class="${cls}" ${click}>${d}</div>`;
+    const click = isDisabled ? '' : `onclick="calPickDay('${dtStr}', event)"`;
+    grid.innerHTML += `<div class="${cls}" data-date="${dtStr}" ${click}>${d}</div>`;
+  }
+  updateCalHint();
+}
+
+// ── Range selection ──────────────────────────────────────────────────────────
+// First click sets an anchor; hovering previews every day between the anchor
+// and the cursor; the second click selects that whole range. Works across
+// months — navigate with ‹ › after the first click and the anchor is kept.
+let calRangeAnchor = null; // "YYYY-MM-DD" or null
+
+function calIsSelectable(dtStr) {
+  const [y, m, d] = dtStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt <= new Date() && dt >= new Date(CAL_MIN_YEAR, 0, 1);
+}
+
+function calDatesBetween(a, b) {
+  const [lo, hi] = a <= b ? [a, b] : [b, a];
+  const [y, m, d] = lo.split('-').map(Number);
+  const out = [];
+  for (let dt = new Date(y, m - 1, d); toDateStr(dt) <= hi; dt.setDate(dt.getDate() + 1)) {
+    const s = toDateStr(dt);
+    if (calIsSelectable(s)) out.push(s);
+  }
+  return out;
+}
+
+function calPreviewRange(hoverStr) {
+  const [lo, hi] = !calRangeAnchor || !hoverStr ? [null, null]
+    : calRangeAnchor <= hoverStr ? [calRangeAnchor, hoverStr] : [hoverStr, calRangeAnchor];
+  document.querySelectorAll('#cal-grid .cal-day[data-date]').forEach(el => {
+    const s = el.dataset.date;
+    el.classList.toggle('in-range', !!lo && s >= lo && s <= hi && !el.classList.contains('disabled'));
+  });
+}
+
+function updateCalHint() {
+  const hint = document.getElementById('cal-hint');
+  if (!hint) return;
+  if (calRangeAnchor) {
+    const [y, m, d] = calRangeAnchor.split('-').map(Number);
+    hint.textContent = `From ${MONTHS[m-1].slice(0,3)} ${d}, ${y} — now click the end date (Esc to cancel).`;
+  } else {
+    hint.textContent = 'Click a start date, then an end date. Ctrl/⌘-click toggles single days.';
   }
 }
+
+function calCancelRange() {
+  if (!calRangeAnchor) return;
+  calRangeAnchor = null;
+  renderCal();
+}
+
+document.getElementById('cal-grid').addEventListener('mouseover', e => {
+  const el = e.target.closest('.cal-day[data-date]');
+  if (el && calRangeAnchor) calPreviewRange(el.dataset.date);
+});
+document.getElementById('cal-grid').addEventListener('mouseleave', () => calPreviewRange(null));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && calRangeAnchor) calCancelRange();
+});
 
 function toDateStr(dt) {
   return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
@@ -245,14 +306,32 @@ function calGoToday() {
   renderCal();
 }
 
-function calPickDay(dateStr) {
-  if (calSelectedDates.has(dateStr)) {
-    calSelectedDates.delete(dateStr);
-  } else {
-    calSelectedDates.add(dateStr);
+function calPickDay(dateStr, e) {
+  // Ctrl/⌘-click: toggle a single day in/out of the current selection.
+  if (e && (e.ctrlKey || e.metaKey)) {
+    calRangeAnchor = null;
+    if (calSelectedDates.has(dateStr)) calSelectedDates.delete(dateStr);
+    else calSelectedDates.add(dateStr);
+    updateCalLabel();
+    renderCal();
+    loadData();
+    return;
   }
+
+  // First click: remember the start of the range and wait for the second.
+  if (!calRangeAnchor) {
+    calRangeAnchor = dateStr;
+    renderCal();
+    calPreviewRange(dateStr);
+    return;
+  }
+
+  // Second click: select every day from the anchor to here (inclusive).
+  calSelectedDates = new Set(calDatesBetween(calRangeAnchor, dateStr));
+  calRangeAnchor = null;
   updateCalLabel();
-  renderCal(); // re-highlight without closing, so multiple days can be picked
+  renderCal();
+  closeCal();
   loadData();
 }
 
@@ -271,7 +350,12 @@ function updateCalLabel() {
     btn.classList.add('active');
     clear.style.display = '';
   } else {
-    label.textContent = `${n} dates selected`;
+    const sorted = [...calSelectedDates].sort();
+    const fmt = s => { const [y, m, d] = s.split('-').map(Number); return `${MONTHS[m-1].slice(0,3)} ${d}`; };
+    const contiguous = calDatesBetween(sorted[0], sorted[sorted.length - 1]).length === n;
+    label.textContent = contiguous
+      ? `${fmt(sorted[0])} – ${fmt(sorted[sorted.length - 1])}, ${sorted[sorted.length - 1].slice(0, 4)}`
+      : `${n} dates selected`;
     btn.classList.add('active');
     clear.style.display = '';
   }
@@ -280,6 +364,7 @@ function updateCalLabel() {
 function clearDate(e) {
   e.stopPropagation();
   calSelectedDates.clear();
+  calRangeAnchor = null;
   document.getElementById('cal-label').textContent = 'Pick date';
   document.getElementById('cal-btn').classList.remove('active');
   document.getElementById('cal-clear').style.display = 'none';
@@ -308,12 +393,15 @@ function toggleCal() {
 }
 
 function closeCal() {
+  calRangeAnchor = null; // an unfinished range is abandoned when the picker closes
   document.getElementById('cal-popup').classList.add('hidden');
   document.removeEventListener('click', calOutsideClick);
 }
 
 function calOutsideClick(e) {
-  if (!e.target.closest('#cal-wrap')) closeCal();
+  // composedPath() is captured at dispatch time, so it still includes
+  // #cal-wrap even if the clicked day was just removed by renderCal().
+  if (!e.composedPath().some(n => n.id === 'cal-wrap')) closeCal();
 }
 
 function onPeriodChange() {
@@ -843,6 +931,7 @@ try {
     for (let i = 0; i < payload.length; i += BATCH_SIZE) batches.push(payload.slice(i, i + BATCH_SIZE));
 
     let totalInserted = 0, totalSkipped = 0;
+    const skipTotals = {}, badSamples = [];
     const affectedEmails = new Set();
 
     for (let b = 0; b < batches.length; b++) {
@@ -867,11 +956,17 @@ try {
 
       totalInserted += data.inserted || 0;
       totalSkipped  += data.skipped  || 0;
+      for (const [k, n] of Object.entries(data.skipReasons || {})) skipTotals[k] = (skipTotals[k] || 0) + n;
+      if (data.badTimeSamples) badSamples.push(...data.badTimeSamples);
       batches[b].forEach(r => affectedEmails.add(r.email));
     }
 
-    prog.className = "import-progress ok";
-    prog.textContent = `✓ Imported ${totalInserted.toLocaleString()} entries for ${affectedEmails.size.toLocaleString()} students. ${totalSkipped > 0 ? `(${totalSkipped.toLocaleString()} duplicates skipped)` : ""}`;
+    const labels = { duplicate: "already in database", badTime: "unreadable time", missingFields: "missing email/date", noUser: "user error" };
+    const breakdown = Object.entries(skipTotals).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${n.toLocaleString()} ${labels[k] || k}`).join(", ");
+    const sample = badSamples.length ? ` — e.g. "${badSamples[0]}"` : "";
+    prog.className = totalInserted === 0 && totalSkipped > 0 ? "import-progress err" : "import-progress ok";
+    prog.textContent = `✓ Imported ${totalInserted.toLocaleString()} entries for ${affectedEmails.size.toLocaleString()} students. ${totalSkipped > 0 ? `(${totalSkipped.toLocaleString()} skipped: ${breakdown || "unknown reason"}${sample})` : ""}`;
     loadData();
   } catch(err) {
     prog.className = "import-progress err";

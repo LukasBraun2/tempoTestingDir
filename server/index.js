@@ -212,7 +212,13 @@ app.use((err, req, res, next) => {
 });
 app.use(passport.initialize());
 app.use(passport.session());
-app.use(express.static(path.join(__dirname, "..", "public")));
+// Always revalidate HTML so browsers never run a stale copy of the admin page
+// (a cached old importer is what sends "05:NaN:00" times).
+app.use(express.static(path.join(__dirname, "..", "public"), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-cache, must-revalidate");
+  },
+}));
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
@@ -1125,21 +1131,42 @@ app.post("/api/admin/import", requireAdmin, async (req, res) => {
     };
 
     let inserted = 0, skipped = 0;
+    const skipReasons = { missingFields: 0, badTime: 0, noUser: 0, duplicate: 0 };
+    const badTimeSamples = [];
     const affectedUsers = new Set();
 
-    for (const r of entries) {
-      if (!r.email || !r.startDate) { skipped++; continue; }
-      // Reject anything that isn't a clean HH:MM:SS so a bad client-side
-      // parse can never write "05:NaN:00" into the table again.
-      const okTime = t => t === undefined || t === "" || /^\d{2}:\d{2}:\d{2}$/.test(t);
-      if (!okTime(r.startTime) || !okTime(r.endTime)) { skipped++; continue; }
-      const user = await getOrCreateUser(r.user, r.email);
-      if (!user) { skipped++; continue; }
+    // Normalise "5:30 PM" / "05:30" / "17:30:00" → "HH:MM:SS". Returns null
+    // for anything unparseable (e.g. "05:NaN:00" from an old cached admin page)
+    // so it can never be written into the table.
+    const normTime = v => {
+      if (v === undefined || v === null || v === "") return "00:00:00";
+      const m = String(v).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*(?:([AaPp])\.?[Mm]?\.?)?$/);
+      if (!m) return null;
+      let h = +m[1]; const mi = +m[2], s = +(m[3] || 0);
+      const ap = m[4] && m[4].toUpperCase();
+      if (ap === "P" && h !== 12) h += 12;
+      if (ap === "A" && h === 12) h = 0;
+      if (h > 23 || mi > 59 || s > 59) return null;
+      const p = n => String(n).padStart(2, "0");
+      return `${p(h)}:${p(mi)}:${p(s)}`;
+    };
 
-      const startISO = `${r.startDate}T${r.startTime || "00:00:00"}`;
-      const endISO   = `${r.endDate}T${r.endTime   || "00:00:00"}`;
+    for (const r of entries) {
+      if (!r.email || !r.startDate) { skipped++; skipReasons.missingFields++; continue; }
+      const startTime = normTime(r.startTime);
+      const endTime   = normTime(r.endTime);
+      if (!startTime || !endTime) {
+        skipped++; skipReasons.badTime++;
+        if (badTimeSamples.length < 5) badTimeSamples.push(`${r.startTime} / ${r.endTime}`);
+        continue;
+      }
+      const user = await getOrCreateUser(r.user, r.email);
+      if (!user) { skipped++; skipReasons.noUser++; continue; }
+
+      const startISO = `${r.startDate}T${startTime}`;
+      const endISO   = `${r.endDate}T${endTime}`;
       const key = `${user.id}|${startISO}`;
-      if (existingKeys.has(key)) { skipped++; continue; }
+      if (existingKeys.has(key)) { skipped++; skipReasons.duplicate++; continue; }
 
       const durationSecs = Math.round((parseFloat(r.durationDecimal) || 0) * 3600);
       const projectId    = r.project ? (projByName[r.project.toLowerCase()] || null) : null;
@@ -1157,7 +1184,8 @@ app.post("/api/admin/import", requireAdmin, async (req, res) => {
     }
 
     await client.query("COMMIT");
-    res.json({ inserted, skipped, users: affectedUsers.size });
+    if (skipReasons.badTime) console.warn("Import: rejected unparseable times, e.g.", badTimeSamples);
+    res.json({ inserted, skipped, skipReasons, badTimeSamples, users: affectedUsers.size });
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Import error:", err);
