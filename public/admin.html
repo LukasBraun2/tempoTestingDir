@@ -612,6 +612,22 @@ dropZone.addEventListener("drop", e => {
   if (file) handleFileSelect(file);
 });
 
+// Parse a clock time like "5:30 PM", "05:30:15 pm", "17:30" or "17:30:00"
+// into "HH:MM:SS" (24h). Returns "" if the value isn't a recognisable time,
+// so callers can drop the row instead of storing garbage like "05:NaN:00".
+function parseClockTime(v) {
+  const m = String(v ?? "").trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?\s*([AaPp])\.?[Mm]?\.?$|^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/);
+  if (!m) return "";
+  let h, mi, s, ap;
+  if (m[1] !== undefined) { h = +m[1]; mi = +m[2]; s = +(m[3] || 0); ap = m[4].toUpperCase(); }
+  else                    { h = +m[5]; mi = +m[6]; s = +(m[7] || 0); ap = null; }
+  if (ap === "P" && h !== 12) h += 12;
+  if (ap === "A" && h === 12) h = 0;
+  if (h > 23 || mi > 59 || s > 59) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${p(h)}:${p(mi)}:${p(s)}`;
+}
+
 window.handleFileSelect = file => {
   if (!file) return;
   const prog = document.getElementById("import-progress");
@@ -654,18 +670,9 @@ window.handleFileSelect = file => {
             return h * 3600 + m * 60 + (s || 0);
           };
 
-          const to24h = str => {
-            str = (str || "").trim();
-            const ampm = str.slice(-2).toUpperCase();
-            const parts = str.slice(0, 8).trim().split(":").map(Number);
-            let h = parts[0], m = parts[1], s = parts[2] || 0;
-            if (ampm === "PM" && h !== 12) h += 12;
-            if (ampm === "AM" && h === 12) h = 0;
-            return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-          };
-
-          let startTime = to24h(c[iST]);
-          let endTime   = to24h(c[iET]);
+          let startTime = parseClockTime(c[iST]);
+          let endTime   = parseClockTime(c[iET]);
+          if (!startTime || !endTime) return null; // unparseable time — skip row
           const durSecs = Math.round((parseFloat(c[iDur]) || 0) * 3600);
 
           const startSecs = timeToSecs(startTime);
@@ -696,7 +703,7 @@ window.handleFileSelect = file => {
             endTime:         endTime,
             durationDecimal: parseFloat(c[iDur]) || 0,
           };
-        }).filter(r => r.email && r.startDate);
+        }).filter(r => r && r.email && r.startDate);
 
         if (importRows.length === 0) {
           prog.className = "import-progress err";
@@ -787,7 +794,7 @@ window.runImport = async () => {
           const s = totalSecs % 60;
           return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
         }
-        return String(v || "00:00:00").slice(0, 8);
+        return parseClockTime(v);
       };
 
       const timeToSecs = t => {
@@ -797,6 +804,7 @@ window.runImport = async () => {
 
       let startTime = toTimeStr(r["Start Time"]);
       let endTime   = toTimeStr(r["End Time"]);
+      if (!startTime || !endTime) return null; // unparseable time — skip row
       const durSecs = Math.round((parseFloat(r["Duration (decimal)"]) || 0) * 3600);
 
       const startSecs = timeToSecs(startTime);
@@ -827,7 +835,7 @@ window.runImport = async () => {
         endTime:         endTime,
         durationDecimal: parseFloat(r["Duration (decimal)"]) || 0,
       };
-    }).filter(r => r.email && r.startDate && r.endDate);
+    }).filter(r => r && r.email && r.startDate && r.endDate);
 
 try {
     const BATCH_SIZE = 2000; // keeps each request well under any reasonable body-size limit

@@ -424,12 +424,20 @@ function displaySortKey(v, tz) {
     const get = t => parts.find(p => p.type === t).value;
     return Date.UTC(+get("year"), +get("month") - 1, +get("day"), +get("hour"), +get("minute"), +get("second"));
   }
-  const m = String(v).match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+  // Seconds are optional; if the time part is malformed (e.g. legacy
+  // "05:NaN:00" rows) still sort by the date / hour we *can* read rather
+  // than collapsing to 0 and landing in arbitrary order.
+  const m = String(v).match(/(\d{4})-(\d{2})-(\d{2})(?:T(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?)?/);
   if (!m) return 0;
-  const [, y, mo, day, h, mi, s] = m.map(Number);
+  const [, y, mo, day, h, mi, s] = m.map(x => (x === undefined ? 0 : Number(x)));
   return Date.UTC(y, mo - 1, day, h, mi, s);
 }
-const byDisplayTimeDesc = (tz) => (a, b) => displaySortKey(b.start, tz) - displaySortKey(a.start, tz);
+// Tie-break on created/id so equal keys always come back in the same order
+// (otherwise Postgres row order — which changes between queries — leaks through).
+const byDisplayTimeDesc = (tz) => (a, b) =>
+  (displaySortKey(b.start, tz) - displaySortKey(a.start, tz)) ||
+  ((Number(b.created) || 0) - (Number(a.created) || 0)) ||
+  String(a.id).localeCompare(String(b.id));
 
 // ── Entries: list ─────────────────────────────────────────────────────────────
 app.get("/api/entries/list", requireAuth, async (req, res) => {
@@ -943,7 +951,8 @@ app.get("/api/admin/entries/feed", requireAdmin, async (req, res) => {
     const { rows: allRows } = await pool.query(
       `SELECT e.*, u.name AS user_name, u.email AS user_email, u.photo AS user_photo
        FROM entries e LEFT JOIN users u ON u.id = e.uid
-       ${whereSql}`,
+       ${whereSql}
+       ORDER BY e.start DESC, e.id`,
       params
     );
     let allEntries = allRows.map(parseEntry);
@@ -1120,6 +1129,10 @@ app.post("/api/admin/import", requireAdmin, async (req, res) => {
 
     for (const r of entries) {
       if (!r.email || !r.startDate) { skipped++; continue; }
+      // Reject anything that isn't a clean HH:MM:SS so a bad client-side
+      // parse can never write "05:NaN:00" into the table again.
+      const okTime = t => t === undefined || t === "" || /^\d{2}:\d{2}:\d{2}$/.test(t);
+      if (!okTime(r.startTime) || !okTime(r.endTime)) { skipped++; continue; }
       const user = await getOrCreateUser(r.user, r.email);
       if (!user) { skipped++; continue; }
 
