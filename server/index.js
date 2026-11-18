@@ -102,6 +102,17 @@ async function initDb() {
   // Older databases created before the `tz` column existed won't get it from
   // CREATE TABLE IF NOT EXISTS, so add it explicitly if missing.
   await pool.query(`ALTER TABLE entries ADD COLUMN IF NOT EXISTS tz TEXT;`);
+  // "Apply timezone" admin tool: original naive values are kept here so a
+  // conversion can be undone; tz_batch groups the rows one run changed;
+  // tz_assumed records which zone the naive wall-clock time was read as
+  // (kept separate from `tz`, which is only ever the browser-reported zone).
+  await pool.query(`
+    ALTER TABLE entries ADD COLUMN IF NOT EXISTS start_naive TEXT;
+    ALTER TABLE entries ADD COLUMN IF NOT EXISTS end_naive   TEXT;
+    ALTER TABLE entries ADD COLUMN IF NOT EXISTS tz_assumed  TEXT;
+    ALTER TABLE entries ADD COLUMN IF NOT EXISTS tz_batch    TEXT;
+    CREATE INDEX IF NOT EXISTS idx_entries_tz_batch ON entries(tz_batch);
+  `);
   console.log("✅  Database schema ready.");
 }
 
@@ -633,6 +644,15 @@ app.patch("/api/entries/:id", requireAuth, async (req, res) => {
       ]
     );
 
+    // If the student changed the times of a log that the "Apply timezone" tool
+    // converted, drop its undo backup so an undo can't overwrite their edit.
+    if ((start !== undefined && start !== e.start) || (end !== undefined && end !== e.end)) {
+      await pool.query(
+        "UPDATE entries SET start_naive = NULL, end_naive = NULL, tz_batch = NULL WHERE id = $1",
+        [req.params.id]
+      );
+    }
+
     const { rows } = await pool.query("SELECT * FROM entries WHERE id = $1", [req.params.id]);
     res.json(parseEntry(rows[0]));
   } catch (err) {
@@ -1109,8 +1129,12 @@ app.post("/api/admin/import", requireAdmin, async (req, res) => {
     await client.query("BEGIN");
 
     // Load existing (uid, start) keys to detect duplicates
-    const { rows: existingRows } = await client.query("SELECT uid, start FROM entries");
+    const { rows: existingRows } = await client.query("SELECT uid, start, start_naive FROM entries");
     const existingKeys = new Set(existingRows.map(r => `${r.uid}|${r.start}`));
+    // Rows converted by "Apply timezone" keep their original naive start in
+    // start_naive — count that too, so re-importing the same CSV still
+    // recognises them as duplicates.
+    for (const r of existingRows) if (r.start_naive) existingKeys.add(`${r.uid}|${r.start_naive}`);
 
     // User cache
     const userCache = {};
@@ -1362,6 +1386,279 @@ function boundsFromDates(datesSet) {
   hi.setUTCDate(hi.getUTCDate() + 2);
   return { lo, hi };
 }
+
+// ── Admin: "Apply timezone" — convert naive logs into real instants ──────────
+// Naive (legacy/imported) rows store a wall-clock time with no zone. This tool
+// reads that wall-clock time *as* a chosen IANA zone (default California) and
+// rewrites start/end as UTC ISO strings ("...Z"), which every existing display
+// path already handles via hasTZInfo(). The display/sort/date-matching helpers
+// above are NOT modified; rows that aren't converted keep behaving as before.
+//
+// Daylight saving is handled by the zone's own rules for each date:
+//  - normal times → the one correct offset (PST or PDT) for that date;
+//  - spring-forward gap (e.g. 2:30 AM that never happened) → moved forward
+//    an hour (2:30 → 3:30 PDT), the standard "compatible" rule;
+//  - fall-back overlap (1:xx AM happens twice) → choose the reading whose
+//    end − start matches the stored duration; if that can't decide, use the
+//    first occurrence and flag it.
+
+const _zoneFmt = {};
+const _offsetCache = new Map();
+function isValidZone(zone) {
+  try { new Intl.DateTimeFormat("en-US", { timeZone: zone }); return true; } catch { return false; }
+}
+// Offset (ms) of `zone` from UTC at instant `ms`. Offsets only change on
+// 15-minute boundaries in practice (some zones switch on :30), so cache per
+// (zone, 15-minute UTC slot).
+function zoneOffsetMs(ms, zone) {
+  const key = zone + "|" + Math.floor(ms / 900000);
+  let off = _offsetCache.get(key);
+  if (off !== undefined) return off;
+  const f = _zoneFmt[zone] || (_zoneFmt[zone] = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone, hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }));
+  const hourStart = Math.floor(ms / 900000) * 900000;
+  const p = {};
+  for (const x of f.formatToParts(new Date(hourStart))) p[x.type] = x.value;
+  off = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) - hourStart;
+  if (_offsetCache.size > 200000) _offsetCache.clear();
+  _offsetCache.set(key, off);
+  return off;
+}
+// All UTC instants at which the wall clock in `zone` reads `wallMs`
+// (wallMs = the wall-clock fields encoded as if they were UTC).
+function wallToInstants(wallMs, zone) {
+  const DAY = 86400000;
+  const offs = new Set([zoneOffsetMs(wallMs - DAY, zone), zoneOffsetMs(wallMs, zone), zoneOffsetMs(wallMs + DAY, zone)]);
+  const hits = [...new Set([...offs].map(o => wallMs - o))]
+    .filter(u => zoneOffsetMs(u, zone) === wallMs - u)
+    .sort((a, b) => a - b);
+  if (hits.length) return { instants: hits, kind: hits.length > 1 ? "ambiguous" : "ok" };
+  // Nonexistent wall time (spring-forward gap): use the offset in effect
+  // before the transition, which lands one hour later on the new clock.
+  return { instants: [wallMs - zoneOffsetMs(wallMs - DAY, zone)], kind: "gap" };
+}
+// Parse a naive stored value "YYYY-MM-DDTHH:MM[:SS[.fff]]" → wallMs, or null.
+function parseNaiveWall(v) {
+  const m = String(v ?? "").trim().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/);
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = [m[1], m[2], m[3], m[4], m[5], m[6] || 0].map(Number);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) return null;
+  const ms = Date.UTC(y, mo - 1, d, h, mi, s);
+  const chk = new Date(ms);
+  if (chk.getUTCDate() !== d || chk.getUTCMonth() !== mo - 1) return null; // e.g. Feb 30
+  return ms;
+}
+// Convert one naive row. Returns { startISO, endISO, flag } or { error }.
+// flag: null | "gap" | "overlap-resolved" | "overlap-guess"
+function convertNaiveRow(row, zone) {
+  const sw = parseNaiveWall(row.start), ew = parseNaiveWall(row.end);
+  if (sw === null || ew === null) return { error: "unreadable" };
+  const S = wallToInstants(sw, zone), E = wallToInstants(ew, zone);
+  const dur = Number(row.duration) || 0;
+  const pairs = [];
+  for (const s of S.instants) for (const e of E.instants) pairs.push({ s, e, miss: Math.abs((e - s) / 1000 - dur) });
+  pairs.sort((a, b) => a.miss - b.miss || a.s - b.s || a.e - b.e);
+  let best = pairs[0], flag = null;
+  if (S.kind === "ambiguous" || E.kind === "ambiguous") {
+    const decisive = pairs.length > 1 && best.miss < 60 && pairs[1].miss >= 60;
+    if (decisive) flag = "overlap-resolved";
+    else {
+      // Couldn't tell from duration → first occurrence of each.
+      best = { s: S.instants[0], e: E.instants[0] };
+      flag = "overlap-guess";
+    }
+  }
+  if (S.kind === "gap" || E.kind === "gap") flag = flag || "gap";
+  return { startISO: new Date(best.s).toISOString(), endISO: new Date(best.e).toISOString(), flag };
+}
+
+// Shared by preview + apply: pick the rows in scope, classify them, decide a
+// zone per (student, source) group and convert. Nothing is written here.
+async function planTzConversion(db, body) {
+  const { scope = "dates", dates = "", project = "", search = "" } = body || {};
+  const defaultTz = body?.defaultTz || PACIFIC_TZ;
+  const overrides = body?.overrides && typeof body.overrides === "object" ? body.overrides : {};
+  if (!isValidZone(defaultTz)) throw Object.assign(new Error(`Unknown timezone: ${defaultTz}`), { status: 400 });
+  for (const z of Object.values(overrides))
+    if (typeof z !== "string" || !isValidZone(z)) throw Object.assign(new Error(`Unknown timezone: ${z}`), { status: 400 });
+
+  const where = [], params = [];
+  let datesSet = null;
+  if (scope === "dates") {
+    datesSet = parseDatesParam(Array.isArray(dates) ? dates.join(",") : dates);
+    if (!datesSet) throw Object.assign(new Error("No dates selected"), { status: 400 });
+    if (![...datesSet].every(d => /^\d{4}-\d{2}-\d{2}$/.test(d)))
+      throw Object.assign(new Error("Invalid date"), { status: 400 });
+    const { lo, hi } = boundsFromDates(datesSet);
+    if (lo) { params.push(lo.toISOString()); where.push(`e.start >= $${params.length}`); }
+    if (hi) { params.push(hi.toISOString()); where.push(`e.start <= $${params.length}`); }
+  }
+  if (project) { params.push(project); where.push(`e.project_id = $${params.length}`); }
+  if (search)  { params.push(`%${String(search).toLowerCase()}%`); where.push(`(LOWER(u.name) LIKE $${params.length} OR LOWER(u.email) LIKE $${params.length})`); }
+
+  const { rows: raw } = await db.query(
+    `SELECT e.id, e.uid, e.start, e."end", e.duration, e.created, u.name AS user_name, u.email AS user_email
+     FROM entries e LEFT JOIN users u ON u.id = e.uid
+     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`,
+    params
+  );
+  const rows = datesSet ? raw.filter(r => matchesDates(r.start, datesSet)) : raw;
+
+  // Imported rows were inserted in bulk, so many share the same ~10-minute
+  // `created` window; rows typed into the app are created one at a time.
+  const { rows: buckets } = await db.query(
+    "SELECT (created / 600000)::bigint AS b, COUNT(*)::int AS n FROM entries GROUP BY 1"
+  );
+  const bucketSize = new Map(buckets.map(b => [String(b.b), b.n]));
+  const sourceOf = r => ((bucketSize.get(String(Math.floor(Number(r.created) / 600000))) || 0) >= 50 ? "imported" : "app");
+
+  // Most-used browser-reported zone per student (from their newer logs).
+  const { rows: tzRows } = await db.query(
+    "SELECT uid, tz, COUNT(*)::int AS n FROM entries WHERE tz IS NOT NULL GROUP BY uid, tz"
+  );
+  const suggested = {};
+  for (const t of tzRows) if (!suggested[t.uid] || t.n > suggested[t.uid].n) suggested[t.uid] = t;
+
+  let alreadyAware = 0, unreadable = 0, mixed = 0;
+  const groups = new Map(), changes = [], flagged = [], unreadableSamples = [];
+  for (const r of rows) {
+    const sAware = hasTZInfo(r.start), eAware = hasTZInfo(r.end);
+    if (sAware && eAware) { alreadyAware++; continue; }
+    if (sAware !== eAware) { mixed++; continue; }
+    const source = sourceOf(r);
+    const key = `${r.uid}|${source}`;
+    const zone = overrides[key] || defaultTz;
+    const c = convertNaiveRow(r, zone);
+    if (c.error) {
+      unreadable++;
+      if (unreadableSamples.length < 5) unreadableSamples.push(`${r.start} → ${r.end}`);
+      continue;
+    }
+    let g = groups.get(key);
+    if (!g) {
+      const sug = suggested[r.uid]?.tz || null;
+      g = {
+        key, uid: r.uid, source, tz: zone,
+        name: r.user_name || r.user_email || "Unknown", email: r.user_email || "",
+        suggestedTz: sug && sug !== zone ? sug : null,
+        count: 0, gap: 0, overlapResolved: 0, overlapGuess: 0, example: null,
+      };
+      groups.set(key, g);
+    }
+    g.count++;
+    if (c.flag === "gap") g.gap++;
+    if (c.flag === "overlap-resolved") g.overlapResolved++;
+    if (c.flag === "overlap-guess") g.overlapGuess++;
+    if (!g.example || r.start > g.example.naive) {
+      g.example = {
+        naive:  r.start,
+        before: `${fmtDateShort(r.start)} ${fmtTime(r.start)}`,
+        after:  `${fmtDateShort(c.startISO)} ${fmtTime(c.startISO)}`,
+      };
+    }
+    if (c.flag && flagged.length < 200) {
+      flagged.push({ name: g.name, source, tz: zone, start: r.start, end: r.end, startISO: c.startISO, endISO: c.endISO, flag: c.flag,
+        after: `${fmtDateShort(c.startISO)} ${fmtTime(c.startISO)}–${fmtTime(c.endISO)} PT` });
+    }
+    changes.push({ id: r.id, oldStart: r.start, oldEnd: r.end, start: c.startISO, end: c.endISO, tz: zone });
+  }
+
+  const groupList = [...groups.values()].sort((a, b) =>
+    (b.suggestedTz ? 1 : 0) - (a.suggestedTz ? 1 : 0) || a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
+  return {
+    changes,
+    summary: {
+      inScope: rows.length, toConvert: changes.length, alreadyAware, unreadable, mixed, unreadableSamples,
+      gap: groupList.reduce((s, g) => s + g.gap, 0),
+      overlapResolved: groupList.reduce((s, g) => s + g.overlapResolved, 0),
+      overlapGuess: groupList.reduce((s, g) => s + g.overlapGuess, 0),
+      groups: groupList, flagged,
+    },
+  };
+}
+
+app.post("/api/admin/tz/preview", requireAdmin, async (req, res) => {
+  try {
+    const { summary } = await planTzConversion(pool, req.body);
+    res.json(summary);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.post("/api/admin/tz/apply", requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { changes, summary } = await planTzConversion(client, req.body);
+    const batchId = `tz_${Date.now()}`;
+    let updated = 0;
+    for (let i = 0; i < changes.length; i += 5000) {
+      const chunk = changes.slice(i, i + 5000);
+      // Only touch rows that are still exactly as previewed and have never
+      // been converted, so nothing can be converted twice.
+      const r = await client.query(
+        `UPDATE entries AS e
+         SET start = v.new_start, "end" = v.new_end,
+             start_naive = e.start, end_naive = e."end",
+             tz_assumed = v.zone, tz_batch = $6
+         FROM (SELECT unnest($1::text[]) AS id, unnest($2::text[]) AS old_start,
+                      unnest($3::text[]) AS new_start, unnest($4::text[]) AS new_end,
+                      unnest($5::text[]) AS zone) AS v
+         WHERE e.id = v.id AND e.start = v.old_start AND e.start_naive IS NULL`,
+        [chunk.map(c => c.id), chunk.map(c => c.oldStart), chunk.map(c => c.start),
+         chunk.map(c => c.end), chunk.map(c => c.tz), batchId]
+      );
+      updated += r.rowCount;
+    }
+    await client.query("COMMIT");
+    res.json({ batchId, updated, planned: changes.length, unreadable: summary.unreadable });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: "Database error" });
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/api/admin/tz/batches", requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT tz_batch AS id, COUNT(*)::int AS count, array_agg(DISTINCT tz_assumed) AS zones
+       FROM entries WHERE tz_batch IS NOT NULL GROUP BY tz_batch ORDER BY tz_batch DESC`
+    );
+    res.json(rows.map(r => ({ ...r, appliedAt: Number(String(r.id).replace(/^tz_/, "")) || null })));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+app.post("/api/admin/tz/undo", requireAdmin, async (req, res) => {
+  const batchId = req.body?.batchId;
+  if (typeof batchId !== "string" || !/^tz_\d+$/.test(batchId))
+    return res.status(400).json({ error: "Invalid batch" });
+  try {
+    const r = await pool.query(
+      `UPDATE entries
+       SET start = start_naive, "end" = end_naive,
+           start_naive = NULL, end_naive = NULL, tz_assumed = NULL, tz_batch = NULL
+       WHERE tz_batch = $1 AND start_naive IS NOT NULL AND end_naive IS NOT NULL`,
+      [batchId]
+    );
+    res.json({ restored: r.rowCount });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 initDb().then(() => {

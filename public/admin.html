@@ -47,6 +47,10 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           Import
         </button>
+        <button class="import-btn" onclick="openTzModal()" title="Convert time logs without a timezone into a known timezone">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Apply timezone
+        </button>
         <button class="import-btn delete-dates-btn" id="delete-dates-btn" style="display:none;color:#ef4444;border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.08);" onclick="deleteSelectedDates()">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
           Delete selected dates
@@ -71,6 +75,10 @@
           <button class="mobile-drop-item" onclick="openImportModal();closeMobileMenu()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Import
+          </button>
+          <button class="mobile-drop-item" onclick="openTzModal();closeMobileMenu()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Apply timezone
           </button>
           <button class="mobile-drop-item mobile-drop-danger delete-dates-btn" style="display:none" onclick="deleteSelectedDates();closeMobileMenu()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
@@ -136,6 +144,37 @@
 
   <div class="table-wrap">
     <div id="student-list"><div class="loading">Loading time logs...</div></div>
+  </div>
+</div>
+
+<!-- ── Apply-timezone Modal ── -->
+<div class="modal-backdrop hidden" id="tz-modal">
+  <div class="modal tz-modal">
+    <h2>Apply timezone</h2>
+    <p>Converts time logs that were saved <b>without</b> a timezone into real times in a timezone you choose. Logs that already have a timezone are never touched. Nothing changes until you click <b>Apply</b>, and every run can be undone below.</p>
+
+    <div class="tz-row">
+      <label class="tz-label">Which logs</label>
+      <div class="tz-scope">
+        <label><input type="radio" name="tz-scope" value="dates" onchange="tzSchedulePreview()"/> <span id="tz-scope-dates-label">Selected dates</span></label>
+        <label><input type="radio" name="tz-scope" value="all" onchange="tzSchedulePreview()"/> All dates</label>
+      </div>
+    </div>
+    <div class="tz-row">
+      <label class="tz-label" for="tz-default">Read times as</label>
+      <select id="tz-default" class="filter-select" onchange="tzSchedulePreview()"></select>
+    </div>
+    <div class="tz-filter-note" id="tz-filter-note"></div>
+
+    <div class="import-progress" id="tz-status"></div>
+    <div id="tz-preview"></div>
+
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeTzModal()">Close</button>
+      <button class="modal-import-btn" id="tz-apply-btn" disabled onclick="applyTz()">Apply</button>
+    </div>
+
+    <div class="tz-batches" id="tz-batches"></div>
   </div>
 </div>
 
@@ -606,6 +645,221 @@ window.loadMoreEntries = async () => {
 };
 
 function loadData() { syncDeleteDatesBtn(); loadStats(); loadEntries(); }
+
+// ── Apply timezone ───────────────────────────────────────────────────────────
+// Server does all the work (/api/admin/tz/*); this just collects choices,
+// shows the preview and calls apply / undo.
+const TZ_COMMON = ['America/Los_Angeles','America/Denver','America/Phoenix','America/Chicago',
+                   'America/New_York','America/Anchorage','Pacific/Honolulu'];
+let tzOverrides = {};      // "uid|source" → IANA zone
+let tzLastPreview = null;
+let tzPreviewTimer = null, tzPreviewSeq = 0;
+
+const escHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function tzZoneOptions(selected) {
+  let all = [];
+  try { all = Intl.supportedValuesOf('timeZone'); } catch { all = TZ_COMMON; }
+  const rest = all.filter(z => !TZ_COMMON.includes(z));
+  const opt = z => `<option value="${z}"${z === selected ? ' selected' : ''}>${z.replace(/_/g, ' ')}${z === 'America/Los_Angeles' ? ' (California)' : ''}</option>`;
+  const extra = selected && !all.includes(selected) ? opt(selected) : '';
+  return `${extra}<optgroup label="Common">${TZ_COMMON.map(opt).join('')}</optgroup><optgroup label="All">${rest.map(opt).join('')}</optgroup>`;
+}
+
+function tzRequestBody() {
+  return {
+    scope:     document.querySelector('input[name="tz-scope"]:checked')?.value || 'all',
+    dates:     [...calSelectedDates].sort().join(','),
+    project:   document.getElementById('proj-filter').value,
+    search:    document.getElementById('search-input')?.value || '',
+    defaultTz: document.getElementById('tz-default').value,
+    overrides: tzOverrides,
+  };
+}
+
+window.openTzModal = () => {
+  tzOverrides = {};
+  tzLastPreview = null;
+  const hasDates = calSelectedDates.size > 0;
+  const datesRadio = document.querySelector('input[name="tz-scope"][value="dates"]');
+  datesRadio.disabled = !hasDates;
+  document.getElementById('tz-scope-dates-label').textContent =
+    hasDates ? `Selected dates (${document.getElementById('cal-label').textContent})` : 'Selected dates (pick some with “Pick date” first)';
+  document.querySelector(`input[name="tz-scope"][value="${hasDates ? 'dates' : 'all'}"]`).checked = true;
+  document.getElementById('tz-default').innerHTML = tzZoneOptions('America/Los_Angeles');
+
+  const proj = document.getElementById('proj-filter');
+  const search = document.getElementById('search-input')?.value || '';
+  const f = [proj.value ? `project “${proj.selectedOptions[0]?.textContent}”` : '', search ? `students matching “${search}”` : ''].filter(Boolean);
+  document.getElementById('tz-filter-note').textContent = f.length ? `Only logs for ${f.join(' and ')} (your current filters).` : '';
+
+  document.getElementById('tz-preview').innerHTML = '';
+  document.getElementById('tz-modal').classList.remove('hidden');
+  loadTzBatches();
+  runTzPreview();
+};
+window.closeTzModal = () => document.getElementById('tz-modal').classList.add('hidden');
+document.getElementById('tz-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('tz-modal')) closeTzModal();
+});
+
+window.tzSchedulePreview = () => {
+  clearTimeout(tzPreviewTimer);
+  tzPreviewTimer = setTimeout(runTzPreview, 300);
+};
+
+async function tzPost(path, body) {
+  const res = await fetch(`${API}/api/admin/tz/${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Server error (status ${res.status})`);
+  return data;
+}
+
+async function runTzPreview() {
+  const seq = ++tzPreviewSeq;
+  const status = document.getElementById('tz-status');
+  const btn = document.getElementById('tz-apply-btn');
+  btn.disabled = true;
+  status.className = 'import-progress';
+  status.textContent = 'Building preview…';
+  try {
+    const p = await tzPost('preview', tzRequestBody());
+    if (seq !== tzPreviewSeq) return; // a newer preview is on its way
+    tzLastPreview = p;
+    status.textContent = '';
+    renderTzPreview(p);
+    btn.disabled = p.toConvert === 0;
+    btn.textContent = p.toConvert ? `Apply to ${p.toConvert.toLocaleString()} logs` : 'Apply';
+  } catch (err) {
+    if (seq !== tzPreviewSeq) return;
+    status.className = 'import-progress err';
+    status.textContent = 'Preview failed: ' + err.message;
+    document.getElementById('tz-preview').innerHTML = '';
+  }
+}
+
+function renderTzPreview(p) {
+  const n = x => x.toLocaleString();
+  const def = document.getElementById('tz-default').value;
+  const sug = p.groups.filter(g => g.suggestedTz);
+  const summary = `
+    <div class="tz-summary">
+      <div><b>${n(p.toConvert)}</b> logs without a timezone will be converted</div>
+      <div>${n(p.alreadyAware)} already have a timezone — left alone</div>
+      ${p.unreadable ? `<div class="tz-warn">${n(p.unreadable)} have an unreadable time and will be skipped${p.unreadableSamples?.length ? ` (e.g. ${escHtml(p.unreadableSamples[0])})` : ''}</div>` : ''}
+      ${p.mixed ? `<div class="tz-warn">${n(p.mixed)} have a timezone on only one of start/end — skipped</div>` : ''}
+      ${p.gap || p.overlapResolved || p.overlapGuess ? `<div>Daylight saving: ${n(p.gap)} in the spring-forward gap (moved +1h), ${n(p.overlapResolved)} in the fall-back hour (decided by duration), ${n(p.overlapGuess)} in the fall-back hour that couldn't be decided (first occurrence used)</div>` : ''}
+    </div>`;
+
+  const sugBar = sug.length ? `
+    <div class="tz-sugbar">
+      ${sug.length} student group${sug.length === 1 ? '' : 's'} recorded newer logs in a different timezone than “${escHtml(def)}”.
+      <button class="tz-mini-btn" onclick="tzUseAllSuggestions()">Use their timezones for logs entered in the app</button>
+    </div>` : '';
+
+  const rows = p.groups.map(g => `
+    <tr class="${g.suggestedTz ? 'tz-has-sug' : ''}">
+      <td><div class="tz-name">${escHtml(g.name)}</div><div class="tz-email">${escHtml(g.email)}</div></td>
+      <td><span class="tz-src tz-src-${g.source}">${g.source === 'imported' ? 'Imported' : 'Entered in app'}</span></td>
+      <td class="mono">${n(g.count)}</td>
+      <td>
+        <select class="tz-sel" onchange="tzSetOverride('${escHtml(g.key)}', this.value)">${tzZoneOptions(g.tz)}</select>
+        ${g.suggestedTz ? `<div class="tz-sug">Newer logs: ${escHtml(g.suggestedTz)} <button class="tz-mini-btn" onclick="tzSetOverride('${escHtml(g.key)}','${escHtml(g.suggestedTz)}')">Use</button></div>` : ''}
+      </td>
+      <td class="mono tz-ex">${g.example ? `${escHtml(g.example.before)} → ${escHtml(g.example.after)}` : ''}</td>
+    </tr>`).join('');
+
+  const flagged = p.flagged.length ? `
+    <details class="tz-flagged">
+      <summary>${n(p.flagged.length)} daylight-saving edge case${p.flagged.length === 1 ? '' : 's'}${p.flagged.length >= 200 ? ' (first 200)' : ''}</summary>
+      <table class="tz-table">
+        <tr><th>Student</th><th>Stored</th><th>Becomes (admin view)</th><th></th></tr>
+        ${p.flagged.map(f => `<tr>
+          <td>${escHtml(f.name)}</td>
+          <td class="mono">${escHtml(f.start)} → ${escHtml(String(f.end).split('T')[1] || f.end)}</td>
+          <td class="mono">${escHtml(f.after)}</td>
+          <td>${f.flag === 'gap' ? 'time didn’t exist — moved +1h' : f.flag === 'overlap-resolved' ? 'fall-back hour — matched duration' : '<span class="tz-warn">fall-back hour — guessed first occurrence</span>'}</td>
+        </tr>`).join('')}
+      </table>
+    </details>` : '';
+
+  document.getElementById('tz-preview').innerHTML = p.groups.length ? `
+    ${summary}${sugBar}
+    <div class="tz-table-wrap">
+      <table class="tz-table">
+        <tr><th>Student</th><th>Source</th><th>Logs</th><th>Read as</th><th>Latest log in admin view</th></tr>
+        ${rows}
+      </table>
+    </div>
+    <div class="tz-foot">“Admin view” is Pacific time, as everywhere on this page — so California logs look the same before and after. Students will see their logs in their own local time.</div>
+    ${flagged}` : summary;
+}
+
+window.tzSetOverride = (key, zone) => { tzOverrides[key] = zone; tzSchedulePreview(); };
+window.tzUseAllSuggestions = () => {
+  for (const g of tzLastPreview?.groups || [])
+    if (g.suggestedTz && g.source === 'app') tzOverrides[g.key] = g.suggestedTz;
+  runTzPreview();
+};
+
+window.applyTz = async () => {
+  const p = tzLastPreview;
+  if (!p || !p.toConvert) return;
+  if (!confirm(`Convert ${p.toConvert.toLocaleString()} time logs to the timezones shown?\n\nThe original times are kept, so you can undo this run afterwards.`)) return;
+  const btn = document.getElementById('tz-apply-btn');
+  const status = document.getElementById('tz-status');
+  btn.disabled = true;
+  status.className = 'import-progress';
+  status.textContent = `Converting ${p.toConvert.toLocaleString()} logs… (this can take a minute for large selections)`;
+  try {
+    const r = await tzPost('apply', tzRequestBody());
+    status.className = 'import-progress ok';
+    status.textContent = `✓ Converted ${r.updated.toLocaleString()} logs.` +
+      (r.updated < r.planned ? ` ${(r.planned - r.updated).toLocaleString()} were skipped because they changed since the preview.` : '');
+    document.getElementById('tz-preview').innerHTML = '';
+    btn.textContent = 'Apply';
+    loadTzBatches();
+    loadData();
+  } catch (err) {
+    status.className = 'import-progress err';
+    status.textContent = 'Apply failed — nothing was changed: ' + err.message;
+    btn.disabled = false;
+  }
+};
+
+async function loadTzBatches() {
+  const el = document.getElementById('tz-batches');
+  try {
+    const res = await fetch(`${API}/api/admin/tz/batches`);
+    if (!res.ok) throw new Error();
+    const list = await res.json();
+    el.innerHTML = list.length ? `
+      <div class="tz-batches-title">Past conversions</div>
+      ${list.map(b => `
+        <div class="tz-batch">
+          <span>${b.appliedAt ? new Date(b.appliedAt).toLocaleString() : escHtml(b.id)} — ${b.count.toLocaleString()} logs — ${escHtml((b.zones || []).join(', '))}</span>
+          <button class="tz-mini-btn tz-undo" onclick="undoTzBatch('${escHtml(b.id)}', ${b.count})">Undo</button>
+        </div>`).join('')}` : '';
+  } catch { el.innerHTML = ''; }
+}
+
+window.undoTzBatch = async (id, count) => {
+  if (!confirm(`Undo this conversion? ${count.toLocaleString()} logs go back to their original times without a timezone.\n\n(Logs a student has edited since are not touched.)`)) return;
+  const status = document.getElementById('tz-status');
+  try {
+    const r = await tzPost('undo', { batchId: id });
+    status.className = 'import-progress ok';
+    status.textContent = `✓ Restored ${r.restored.toLocaleString()} logs to their original times.`;
+    loadTzBatches();
+    loadData();
+    runTzPreview();
+  } catch (err) {
+    status.className = 'import-progress err';
+    status.textContent = 'Undo failed: ' + err.message;
+  }
+};
 
 // "Delete selected dates" only appears while at least one date is picked.
 function syncDeleteDatesBtn() {
