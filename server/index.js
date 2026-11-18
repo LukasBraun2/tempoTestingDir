@@ -386,15 +386,30 @@ const fmtShort = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); re
 const PACIFIC_TZ = "America/Los_Angeles";
 const hasTZInfo  = v => typeof v === "string" && /(Z|[+-]\d{2}:?\d{2})$/.test(v.trim());
 
+// PERFORMANCE: building an Intl.DateTimeFormat is expensive (~30–1000µs), and
+// toLocale*String(..., options) builds a fresh one on every call. With
+// 100k+ timezone-aware rows that froze the server for minutes. These reuse
+// one formatter per (format, zone) — same options, so output is identical.
+// Only the timezone-aware branches use them; naive branches are untouched.
+const _dtfCache = new Map();
+function cachedDTF(kind, tz, options) {
+  const key = kind + "|" + tz;
+  let f = _dtfCache.get(key);
+  if (!f) { f = new Intl.DateTimeFormat("en-US", { ...options, timeZone: tz }); _dtfCache.set(key, f); }
+  return f;
+}
+// .format() throws on an invalid Date where toLocale*String returned
+// "Invalid Date" — keep the old behavior.
+const fmtWith = (f, d) => { const dt = new Date(d); return isNaN(dt) ? "Invalid Date" : f.format(dt); };
+
 // `tz` is only consulted for timezone-aware values; naive values always
 // fall back to the original string-parsing behavior so nothing about
 // previously-saved entries changes.
 const fmtTime = (d, tz) => {
   if (hasTZInfo(d)) {
-    return new Date(d).toLocaleTimeString("en-US", {
+    return fmtWith(cachedDTF("time", tz || PACIFIC_TZ, {
       hour12: true, hour: "numeric", minute: "2-digit",
-      timeZone: tz || PACIFIC_TZ,
-    });
+    }), d);
   }
   const t = String(d).split("T")[1] || "";
   const [h, m] = t.split(":");
@@ -405,9 +420,9 @@ const fmtTime = (d, tz) => {
 };
 const fmtDate = (d, tz) => {
   if (hasTZInfo(d)) {
-    return new Date(d).toLocaleDateString("en-US", {
-      weekday: "long", month: "short", day: "numeric", timeZone: tz || PACIFIC_TZ,
-    });
+    return fmtWith(cachedDTF("dateLong", tz || PACIFIC_TZ, {
+      weekday: "long", month: "short", day: "numeric",
+    }), d);
   }
   const dateStr = String(d).split("T")[0]; // "2024-05-01"
   const [y, mo, day] = dateStr.split("-").map(Number);
@@ -416,7 +431,7 @@ const fmtDate = (d, tz) => {
 };
 const fmtDateShort = (d, tz) => {
   if (hasTZInfo(d)) {
-    return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: tz || PACIFIC_TZ });
+    return fmtWith(cachedDTF("dateShort", tz || PACIFIC_TZ, { month: "short", day: "numeric" }), d);
   }
   const dateStr = String(d).split("T")[0];
   const [y, mo, day] = dateStr.split("-").map(Number);
@@ -433,8 +448,8 @@ const fmtDateShort = (d, tz) => {
 // for a given `tz`, so list order always matches the printed order.
 function displaySortKey(v, tz) {
   if (hasTZInfo(v)) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz || PACIFIC_TZ, hourCycle: "h23",
+    const parts = cachedDTF("sortKey", tz || PACIFIC_TZ, {
+      hourCycle: "h23",
       year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", second: "2-digit",
     }).formatToParts(new Date(v));
@@ -451,10 +466,16 @@ function displaySortKey(v, tz) {
 }
 // Tie-break on created/id so equal keys always come back in the same order
 // (otherwise Postgres row order — which changes between queries — leaks through).
-const byDisplayTimeDesc = (tz) => (a, b) =>
-  (displaySortKey(b.start, tz) - displaySortKey(a.start, tz)) ||
-  ((Number(b.created) || 0) - (Number(a.created) || 0)) ||
-  String(a.id).localeCompare(String(b.id));
+// Each row's key is computed once per sort (memoized by start value) instead
+// of on every comparison — same keys, same order, ~log2(n)× fewer calls.
+const byDisplayTimeDesc = (tz) => {
+  const memo = new Map();
+  const key = v => { let k = memo.get(v); if (k === undefined) { k = displaySortKey(v, tz); memo.set(v, k); } return k; };
+  return (a, b) =>
+    (key(b.start) - key(a.start)) ||
+    ((Number(b.created) || 0) - (Number(a.created) || 0)) ||
+    String(a.id).localeCompare(String(b.id));
+};
 
 // ── Entries: list ─────────────────────────────────────────────────────────────
 app.get("/api/entries/list", requireAuth, async (req, res) => {
@@ -1074,8 +1095,8 @@ app.get("/api/admin/export", requireAdmin, async (req, res) => {
 
     const toDate = iso => {
       if (hasTZInfo(iso)) {
-        const parts = new Intl.DateTimeFormat("en-US", {
-          timeZone: PACIFIC_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+        const parts = cachedDTF("ymd", PACIFIC_TZ, {
+          year: "numeric", month: "2-digit", day: "2-digit",
         }).formatToParts(new Date(iso));
         const get = t => parts.find(p => p.type === t).value;
         return `${get("month")}/${get("day")}/${get("year")}`;
@@ -1084,7 +1105,7 @@ app.get("/api/admin/export", requireAdmin, async (req, res) => {
       return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`;
     };
     const toTime = iso => hasTZInfo(iso)
-      ? new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"numeric",minute:"2-digit",timeZone:PACIFIC_TZ})
+      ? fmtWith(cachedDTF("time", PACIFIC_TZ, {hour12:true,hour:"numeric",minute:"2-digit"}), iso)
       : new Date(iso).toLocaleTimeString("en-US",{hour12:true,hour:"numeric",minute:"2-digit"});
     const toDuration = secs => { const h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60),s=secs%60; return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`; };
     const escape     = v => `"${String(v??"").replace(/"/g,'""')}"`;
@@ -1366,8 +1387,8 @@ function parseDatesParam(v) {
 // stored date, exactly like it does everywhere else in the admin views.
 function entryDateStr(v, tz) {
   if (hasTZInfo(v)) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz || PACIFIC_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    const parts = cachedDTF("ymd", tz || PACIFIC_TZ, {
+      year: "numeric", month: "2-digit", day: "2-digit",
     }).formatToParts(new Date(v));
     const get = t => parts.find(p => p.type === t).value;
     return `${get("year")}-${get("month")}-${get("day")}`;
