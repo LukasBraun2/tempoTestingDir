@@ -1336,12 +1336,29 @@ function periodEnd(period, date) {
 
 // ── Multi-day filtering (calendar lets the admin highlight several,
 // possibly non-contiguous, days at once) ───────────────────────────────────
-// `dates` is a comma-separated list of "YYYY-MM-DD" strings. When present it
-// takes priority over the single date/period range above.
+// `dates` is a comma-separated list of "YYYY-MM-DD" strings and/or inclusive
+// "YYYY-MM-DD..YYYY-MM-DD" ranges (the admin page compresses consecutive days
+// into ranges so a multi-year selection still fits in a URL). Ranges are
+// expanded here into the same Set of day strings as before, so everything
+// downstream (matchesDates etc.) is unchanged. When present it takes priority
+// over the single date/period range above.
+const MAX_DATES_EXPANDED = 20000; // ~55 years — guards against absurd ranges
 function parseDatesParam(v) {
   if (typeof v !== "string" || !v.trim()) return null;
-  const days = v.split(",").map(s => s.trim()).filter(Boolean);
-  return days.length ? new Set(days) : null;
+  const days = new Set();
+  for (const tok of v.split(",").map(s => s.trim()).filter(Boolean)) {
+    const m = tok.match(/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+    if (!m) { days.add(tok); continue; }
+    const [lo, hi] = m[1] <= m[2] ? [m[1], m[2]] : [m[2], m[1]];
+    const d = new Date(lo + "T00:00:00Z");
+    if (isNaN(d)) { days.add(tok); continue; }
+    for (let s = lo; s <= hi && days.size < MAX_DATES_EXPANDED; ) {
+      days.add(s);
+      d.setUTCDate(d.getUTCDate() + 1);
+      s = d.toISOString().slice(0, 10);
+    }
+  }
+  return days.size ? days : null;
 }
 // The calendar's day labels are in Pacific time (matching every other
 // admin-facing display), so a timezone-aware entry is bucketed by its

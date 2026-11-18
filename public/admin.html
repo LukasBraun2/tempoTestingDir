@@ -462,6 +462,33 @@ function onPeriodChange() {
   loadData();
 }
 
+// Compress a set of "YYYY-MM-DD" days into "a..b" runs of consecutive days
+// (single days stay as-is). A multi-year highlight becomes one short token
+// instead of thousands of dates — sending them all overflowed the URL limit.
+function encodeDates(set) {
+  const sorted = [...set].sort();
+  const next = s => { const [y, m, d] = s.split('-').map(Number); return toDateStr(new Date(y, m - 1, d + 1)); };
+  const out = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === next(sorted[j])) j++;
+    out.push(i === j ? sorted[i] : `${sorted[i]}..${sorted[j]}`);
+    i = j + 1;
+  }
+  return out.join(',');
+}
+
+// Only a 401 means the admin session is gone; anything else (server error,
+// request too large, …) should show an error, not sign the admin out.
+async function handleAdminFetchError(res, what) {
+  if (res.status === 401) { signOutAdmin(); return; }
+  let msg = `status ${res.status}`;
+  try { const d = await res.json(); if (d.error) msg = d.error; } catch {}
+  console.error(`Failed to load ${what}:`, msg);
+  const el = document.getElementById("last-updated");
+  if (el) el.textContent = `Couldn't load ${what} (${msg})`;
+}
+
 // ── Helper: build common query params (dates OR period) ────────────────────────
 function buildParams(extras = {}) {
   const base = {
@@ -470,7 +497,7 @@ function buildParams(extras = {}) {
   };
   if (calSelectedDates.size > 0) {
     base.period = 'day';
-    base.dates  = [...calSelectedDates].sort().join(',');
+    base.dates  = encodeDates(calSelectedDates);
   } else {
     base.period = document.getElementById('week-filter').value;
   }
@@ -559,7 +586,7 @@ async function loadStats() {
   const params = buildParams({ search: '' });
   try {
     const res = await fetch(`${API}/api/admin/stats?` + params);
-    if (!res.ok) { signOutAdmin(); return; }
+    if (!res.ok) { await handleAdminFetchError(res, "stats"); return; }
     const s = await res.json();
     document.getElementById("stat-students").textContent = s.totalStudents;
     document.getElementById("stat-week").textContent     = s.weekFormatted;
@@ -607,7 +634,7 @@ async function loadEntries() {
   const params = buildParams({ search, limit: ENTRY_PAGE_SIZE, offset: 0 });
   try {
     const res = await fetch(`${API}/api/admin/entries/feed?` + params);
-    if (!res.ok) { signOutAdmin(); return; }
+    if (!res.ok) { await handleAdminFetchError(res, "entries"); return; }
     const data = await res.json();
     lastEntries  = data.entries;
     entryHasMore = !!data.hasMore;
@@ -631,7 +658,7 @@ window.loadMoreEntries = async () => {
   const params = buildParams({ search, limit: ENTRY_PAGE_SIZE, offset: entryOffset });
   try {
     const res = await fetch(`${API}/api/admin/entries/feed?` + params);
-    if (!res.ok) { signOutAdmin(); return; }
+    if (!res.ok) { await handleAdminFetchError(res, "more entries"); return; }
     const data = await res.json();
     lastEntries  = lastEntries.concat(data.entries);
     entryHasMore = !!data.hasMore;
@@ -669,7 +696,7 @@ function tzZoneOptions(selected) {
 function tzRequestBody() {
   return {
     scope:     document.querySelector('input[name="tz-scope"]:checked')?.value || 'all',
-    dates:     [...calSelectedDates].sort().join(','),
+    dates:     encodeDates(calSelectedDates),
     project:   document.getElementById('proj-filter').value,
     search:    document.getElementById('search-input')?.value || '',
     defaultTz: document.getElementById('tz-default').value,
@@ -870,7 +897,7 @@ function syncDeleteDatesBtn() {
 window.deleteSelectedDates = async () => {
   if (calSelectedDates.size === 0) return;
   const body = {
-    dates:   [...calSelectedDates].sort().join(','),
+    dates:   encodeDates(calSelectedDates),
     project: document.getElementById('proj-filter').value,
     search:  document.getElementById('search-input')?.value || '',
   };
