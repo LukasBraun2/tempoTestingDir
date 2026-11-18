@@ -47,6 +47,10 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           Import
         </button>
+        <button class="import-btn delete-dates-btn" id="delete-dates-btn" style="display:none;color:#ef4444;border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.08);" onclick="deleteSelectedDates()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+          Delete selected dates
+        </button>
         <button class="import-btn" style="color:#ef4444;border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.08);" onclick="deleteAllEntries()">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
           Clear all
@@ -67,6 +71,10 @@
           <button class="mobile-drop-item" onclick="openImportModal();closeMobileMenu()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Import
+          </button>
+          <button class="mobile-drop-item mobile-drop-danger delete-dates-btn" style="display:none" onclick="deleteSelectedDates();closeMobileMenu()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            Delete selected dates
           </button>
           <button class="mobile-drop-item mobile-drop-danger" onclick="deleteAllEntries();closeMobileMenu()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
@@ -597,7 +605,46 @@ window.loadMoreEntries = async () => {
   }
 };
 
-function loadData() { loadStats(); loadEntries(); }
+function loadData() { syncDeleteDatesBtn(); loadStats(); loadEntries(); }
+
+// "Delete selected dates" only appears while at least one date is picked.
+function syncDeleteDatesBtn() {
+  const show = calSelectedDates.size > 0;
+  document.querySelectorAll('.delete-dates-btn').forEach(b => { b.style.display = show ? '' : 'none'; });
+}
+
+window.deleteSelectedDates = async () => {
+  if (calSelectedDates.size === 0) return;
+  const body = {
+    dates:   [...calSelectedDates].sort().join(','),
+    project: document.getElementById('proj-filter').value,
+    search:  document.getElementById('search-input')?.value || '',
+  };
+  const post = async extra => {
+    const res = await fetch(`${API}/api/admin/entries/delete-dates`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, ...extra }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Server error (status ${res.status})`);
+    return data;
+  };
+  try {
+    const { count } = await post({ dryRun: true });
+    const what = document.getElementById('cal-label').textContent;
+    if (count === 0) { alert(`No time logs found on ${what}.`); return; }
+    const filters = [
+      body.project ? `project "${document.getElementById('proj-filter').selectedOptions[0]?.textContent || body.project}"` : '',
+      body.search  ? `students matching "${body.search}"` : '',
+    ].filter(Boolean).join(' and ');
+    if (!confirm(`Delete ${count.toLocaleString()} time log${count === 1 ? '' : 's'} on ${what}${filters ? ` (only ${filters})` : ''}? This cannot be undone.`)) return;
+    const { deleted } = await post({});
+    alert(`Deleted ${deleted.toLocaleString()} time log${deleted === 1 ? '' : 's'}.`);
+    loadData();
+  } catch (err) {
+    alert('Failed to delete entries: ' + err.message);
+  }
+};
 
 let searchTimer;
 function debouncedLoad() {

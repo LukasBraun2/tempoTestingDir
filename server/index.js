@@ -1204,6 +1204,54 @@ app.delete("/api/admin/entries/all", requireAdmin, async (req, res) => {
     res.status(500).json({ error: "Database error" });
   }
 });
+// ── Admin: delete entries on selected dates ──────────────────────────────────
+// Matches rows with the SAME logic the entries feed uses to display them
+// (boundsFromDates for a cheap SQL pre-filter, then matchesDates for the exact
+// per-day match), so exactly the entries shown for those dates are deleted —
+// including legacy naive-timestamp rows. Honors the project/search filters too.
+// { dryRun: true } only returns the count, for the confirmation prompt.
+app.post("/api/admin/entries/delete-dates", requireAdmin, async (req, res) => {
+  const { dates = "", project = "", search = "", dryRun = false } = req.body || {};
+  const datesSet = parseDatesParam(Array.isArray(dates) ? dates.join(",") : dates);
+  if (!datesSet) return res.status(400).json({ error: "No dates selected" });
+  if (![...datesSet].every(d => /^\d{4}-\d{2}-\d{2}$/.test(d)))
+    return res.status(400).json({ error: "Invalid date" });
+
+  const client = await pool.connect();
+  try {
+    const where = [], params = [];
+    const { lo, hi } = boundsFromDates(datesSet);
+    if (lo) { params.push(lo.toISOString()); where.push(`e.start >= $${params.length}`); }
+    if (hi) { params.push(hi.toISOString()); where.push(`e.start <= $${params.length}`); }
+    if (project) { params.push(project); where.push(`e.project_id = $${params.length}`); }
+    if (search)  { params.push(`%${String(search).toLowerCase()}%`); where.push(`(LOWER(u.name) LIKE $${params.length} OR LOWER(u.email) LIKE $${params.length})`); }
+
+    await client.query("BEGIN");
+    const { rows } = await client.query(
+      `SELECT e.id, e.start FROM entries e LEFT JOIN users u ON u.id = e.uid
+       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`,
+      params
+    );
+    const ids = rows.filter(r => matchesDates(r.start, datesSet)).map(r => r.id);
+
+    if (dryRun) { await client.query("ROLLBACK"); return res.json({ count: ids.length }); }
+
+    let deleted = 0;
+    for (let i = 0; i < ids.length; i += 5000) {
+      const r = await client.query("DELETE FROM entries WHERE id = ANY($1::text[])", [ids.slice(i, i + 5000)]);
+      deleted += r.rowCount;
+    }
+    await client.query("COMMIT");
+    res.json({ deleted });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(err);
+    res.status(500).json({ error: "Database error" });
+  } finally {
+    client.release();
+  }
+});
+
 // ── Admin: change password ────────────────────────────────────────────────────
 app.post("/api/admin/change-password", requireAdmin, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
